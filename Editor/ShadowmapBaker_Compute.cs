@@ -1,6 +1,20 @@
-﻿using System.Collections;
+﻿#define _ENABLE_LV3_MODE
+//#define _GEN_SCALED_TEX
+#define _ENABLE_BIG_TEX
+//#define _LV3_OLD_MODE
+using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
+using Unity.Jobs.LowLevel.Unsafe;
+using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
+using Object = UnityEngine.Object;
 
 public partial class ShadowmapBaker
 {
@@ -9,20 +23,11 @@ public partial class ShadowmapBaker
     // compute lv3 lit or shadow info first, then summary to lv2 and rootLv1
     void precomputeVoxelDepth()
     {
-        //List<Color32> map1Colors = new List<Color32>();
-        //List<Color32> map2Colors = new List<Color32>();
-        //List<Color32> map3COlors = new List<Color32>();
-        //Dictionary<int, Dictionary<int, LitOrShadow>> litshadowInfo = new Dictionary<int, Dictionary<int, LitOrShadow>>();
-
-        //Dictionary<BlockIndex, LitOrShadow> litShadowInfo = new Dictionary<BlockIndex, LitOrShadow>();
-
-        //List<Texture2D> lv1Blocks = new List<Texture2D>();
 
         int rootVoxelSize = RootVoxelWidthSize;
         int lv2VoxelSize = rootVoxelSize * 2;
         int lv3VoxelSize = lv2VoxelSize * 2;
-        int lv4VoxelSize = lv3VoxelSize * 2;
-        int lv5VoxelSize = lv4VoxelSize * 2;
+        int lv4VoxelSize = lv3VoxelSize * 8;
         int rootPixelPerVoxel = 0;
         int lv2PixelPerVoxel = 0;
         int lv3PixelPerVoxel = 0;
@@ -33,29 +38,38 @@ public partial class ShadowmapBaker
         rootPixelPerVoxel = shadowMapWidth / RootVoxelWidthSize;
         lv2PixelPerVoxel = rootPixelPerVoxel / 2;
         lv3PixelPerVoxel = lv2PixelPerVoxel / 2;
-        lv4PixelPerVoxel = lv3PixelPerVoxel / 2;
+        lv4PixelPerVoxel = lv3PixelPerVoxel / 8;
 
         // lv3VoxelBlockInfo 32 * 32 * 32 if root is 8*8*8 .   lv3 4*4*4 voxel == lv1 1*1*1
         int resultTextureSize = lv3VoxelSize;
         // int resultMaxBlockCount = 256 / lv3VoxelSize;
         // Texture2D litShadowInfoMap = new Texture2D(resultTextureSize, resultTextureSize, TextureFormat.ARGB32, false, true);
-        Texture2DArray litShadowInfoArrayLv4 = new Texture2DArray(lv4VoxelSize, lv4VoxelSize, lv4VoxelSize, TextureFormat.RGBA32, false, true);
-        Texture2DArray litShadowInfoArrayLv3 = new Texture2DArray(lv3VoxelSize, lv3VoxelSize, lv3VoxelSize, TextureFormat.RGBA32, false, true);
-        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(lv2VoxelSize, lv2VoxelSize, lv2VoxelSize, TextureFormat.RGBA32, false, true);
-        Texture2DArray litShadowInfoArrayLv1 = new Texture2DArray(rootVoxelSize, rootVoxelSize, rootVoxelSize, TextureFormat.RGBA32, false, true);
+        int voxelAreaLv4 = lv4VoxelSize * lv4VoxelSize;
+        int voxelAreaLv3 = lv3VoxelSize * lv3VoxelSize;
+        int voxelAreaLv2 = lv2VoxelSize * lv2VoxelSize;
+        int voxelAreaLv1 = rootVoxelSize * rootVoxelSize;
+        Texture2DArray litShadowInfoArrayLv4 = new Texture2DArray(lv4VoxelSize, lv4VoxelSize, lv4VoxelSize, TextureFormat.Alpha8, false, true);
+        Texture2DArray litShadowInfoArrayLv3 = new Texture2DArray(lv3VoxelSize, lv3VoxelSize, lv3VoxelSize, TextureFormat.Alpha8, false, true);
+        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(lv2VoxelSize, lv2VoxelSize, lv2VoxelSize, TextureFormat.Alpha8, false, true);
+        Texture2DArray litShadowInfoArrayLv1 = new Texture2DArray(rootVoxelSize, rootVoxelSize, rootVoxelSize, TextureFormat.Alpha8, false, true);
+        var litShadowInfoArrayLv4Na = new NativeArray<byte>(lv4VoxelSize * lv4VoxelSize * lv4VoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
+        var litShadowInfoArrayLv3Na = new NativeArray<byte>(lv3VoxelSize * lv3VoxelSize * lv3VoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
+        var litShadowInfoArrayLv2Na = new NativeArray<byte>(lv2VoxelSize * lv2VoxelSize * lv2VoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
+        var litShadowInfoArrayLv1Na = new NativeArray<byte>(rootVoxelSize * rootVoxelSize * rootVoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
 
         List<Object> resourceToRelease = new List<Object>();
 
         object lockObj = new object();
         int threadCount = 0;
-        Queue<Action> mainThreadTasks = new Queue<Action>();
+        List<Task> pendingTask = new List<Task>();
         List<Task> plTasks = new List<Task>();
 
         var mainTaskScheduler = TaskScheduler.FromCurrentSynchronizationContext();
         // z-depth 
-        for (int dVoxelIndex = 0, dVoxelMaxIndex = lv3VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
+        for (int dVoxelIndex = 0, dVoxelMaxIndex = lv4VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
         {
             var voxelLitShadowInfo = AssetDatabase.LoadAssetAtPath<Texture2D>(string.Format("Assets/litshadowmap/voxel_lv_{0}.asset", dVoxelIndex));
+            bool isAlpha8 = voxelLitShadowInfo.format == TextureFormat.Alpha8;
             resourceToRelease.Add(voxelLitShadowInfo);
             if (voxelLitShadowInfo == null)
             {
@@ -63,28 +77,25 @@ public partial class ShadowmapBaker
             }
             var tex = voxelLitShadowInfo;
             var texName = tex.name;
-            var blockPixels = litShadowInfoArrayLv4.GetPixels(dVoxelIndex, 0);
-            var voxelLitShadowInfoNA = voxelLitShadowInfo.GetRawTextureData<Color32>();
+            var blockPixels = litShadowInfoArrayLv4Na.GetSubArray(voxelAreaLv4 * dVoxelIndex, voxelAreaLv4);;// litShadowInfoArrayLv4.GetPixels(dVoxelIndex, 0);
+            var voxelLitShadowInfoColorNA = voxelLitShadowInfo.GetRawTextureData<Color32>();
+            var voxelLitShadowInfoNA = voxelLitShadowInfo.GetRawTextureData<byte>();
             float startTime = Time.realtimeSinceStartup;
 
-
-            while (threadCount > 128)
+            if (pendingTask.Count > 64)
             {
-                System.Threading.Thread.Sleep(300);
-                //if(Time.realtimeSinceStartup - startTime > 60)
-                //{
-                //    return;
-                //}
+                Task.WaitAll(pendingTask.ToArray());
+                pendingTask.Clear();
             }
 
+   
             int dVoxelIndexTmp = dVoxelIndex;
             System.Action task = () =>
             {
-                litShadowInfoArrayLv4.SetPixels(blockPixels, dVoxelIndexTmp, 0);
+                //litShadowInfoArrayLv4.SetPixels(blockPixels, dVoxelIndexTmp, 0);
+               // NativeArray<byte>.Copy(blockPixels, 0, litShadowInfoArrayLv4Na, litShadowInfoArrayLv4.width * litShadowInfoArrayLv4.height * dVoxelIndexTmp, blockPixels.Length);
             };
 
-
-            // 
             int width = voxelLitShadowInfo.width;
             int height = voxelLitShadowInfo.height;
             //System.Threading.ThreadPool.UnsafeQueueUserWorkItem(
@@ -94,10 +105,16 @@ public partial class ShadowmapBaker
                 int errorIndex = 0;
                 unsafe
                 {
-                    Color32* voxelLitShadowInfoPtr = (Color32*)voxelLitShadowInfoNA.GetUnsafePtr<Color32>(); // .GetUnsafePtr<Color>();
-                    for (int vBlockIndex = 0, vBlockIdxMax = lv3VoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
+                    Color32* voxelLitShadowInfoPtr = null;
+                    byte* alpha8 = null;
+                    if (isAlpha8)
+                        alpha8 = (byte*)voxelLitShadowInfoNA.GetUnsafePtr<byte>();
+                    else
+                        voxelLitShadowInfoPtr = (Color32*)voxelLitShadowInfoColorNA.GetUnsafePtr<Color32>();
+
+                    for (int vBlockIndex = 0, vBlockIdxMax = lv4VoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
                     {
-                        for (int uBlockIndex = 0, uBlockIdxMax = lv3VoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
+                        for (int uBlockIndex = 0, uBlockIdxMax = lv4VoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
                         {
                             int uPixelBase = lv4PixelPerVoxel * uBlockIndex;
                             int vPixelBase = lv4PixelPerVoxel * vBlockIndex;
@@ -109,13 +126,14 @@ public partial class ShadowmapBaker
                                 for (int uPixelSub = 0, uPixelMax = lv4PixelPerVoxel; uPixelSub < lv4PixelPerVoxel; uPixelSub++)
                                 {
                                     int vPixel = vPixelBase + vPixelSub;
+                                    //vPixel = vBlockIndex * uBlockIdxMax * lv3PixelPerVoxel * lv3PixelPerVoxel;
                                     int uPixel = uPixelBase + uPixelSub;
 
-                                    var pixel = voxelLitShadowInfoPtr[vPixel * width + uPixel];// voxelLitShadowInfo.GetPixel(uPixel, vPixel, 0);
+                                    var pixel = isAlpha8 ? alpha8[vPixel * width + uPixel] / 255.0f : voxelLitShadowInfoPtr[vPixel * width + uPixel].r;
                                     errorIndex = vPixel * width + uPixel;
-                                    var isWhite = Mathf.Abs(pixel.r - 1) < 0.1f;
-                                    var isBlack = Mathf.Abs(pixel.r - 0) < 0.1f;
-                                    var isGray = Mathf.Abs(pixel.r - 0.5f) < 0.1f;
+                                    var isWhite = Mathf.Abs(pixel - 1) < 0.1f;
+                                    var isBlack = Mathf.Abs(pixel - 0) < 0.1f;
+                                    var isGray = Mathf.Abs(pixel - 0.5f) < 0.1f;
                                     isBlockLit &= isWhite;
                                     isBlockShadow &= isBlack;
                                 }
@@ -123,21 +141,13 @@ public partial class ShadowmapBaker
 
                             bool isBlockIntersection = !isBlockLit && !isBlockShadow;
                             var blockResult = (isBlockLit ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
-                            blockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = Color.white * blockResult;
+                            if (isBlockIntersection)
+                            {
+                                blockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = 128;
+                            }
+                            blockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = (byte)Mathf.RoundToInt((blockResult * 255));// Color.white * blockResult;
                         }
                     }
-                }
-
-
-                //litShadowInfoArrayLv3.SetPixels(blockPixels, dVoxelIndex, 0);
-                //task.Start(mainTaskScheduler);
-                lock (mainThreadTasks)
-                {
-                    mainThreadTasks.Enqueue(task);
-                }
-                lock (lockObj)
-                {
-                    threadCount--;
                 }
 
             });
@@ -145,28 +155,13 @@ public partial class ShadowmapBaker
             plTasks.Add(plTask);
 
 
-            while (mainThreadTasks.Count > 16)
-            {
-                lock (mainThreadTasks)
-                {
-                    while (mainThreadTasks.Count > 0)
-                    {
-                        var pendingTask = mainThreadTasks.Dequeue();
-                        pendingTask();
-                    }
-                }
-            }
-
 
             if (plTasks.Count > 32)
             {
                 plTasks.ForEach((t) =>
                 {
-                    lock (lockObj)
-                    {
-                        threadCount++;
-                    }
                     t.Start();
+                    pendingTask.Add(t);
                 });
                 plTasks.Clear();
             }
@@ -185,41 +180,53 @@ public partial class ShadowmapBaker
         {
             plTasks.ForEach((t) =>
             {
-                threadCount++;
                 t.Start();
+                pendingTask.Add(t);
             });
             plTasks.Clear();
         }
-
-        while (threadCount != 0)
+        if (pendingTask.Count > 0)
         {
-            System.Threading.Thread.Sleep(300);
-        }
-        while (mainThreadTasks.Count > 0)
-        {
-            lock (mainThreadTasks)
-            {
-                var pendingTask = mainThreadTasks.Dequeue();
-                pendingTask();
-            }
+            Task.WaitAll(pendingTask.ToArray());
+            pendingTask.Clear();
         }
 
+
+        for (int depth = 0, maxDepth = litShadowInfoArrayLv4.depth; depth < maxDepth; depth++) {
+            var subArray = litShadowInfoArrayLv4Na.GetSubArray(depth * voxelAreaLv4, voxelAreaLv4);
+            litShadowInfoArrayLv4.SetPixelData<byte>(subArray, 0, depth);
+        }
         litShadowInfoArrayLv4.Apply(false, false);
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
 
-        DownSample(lv3VoxelSize, lv4VoxelSize, litShadowInfoArrayLv3, litShadowInfoArrayLv4);
+        DownSample(lv3VoxelSize, lv4VoxelSize, litShadowInfoArrayLv3Na, litShadowInfoArrayLv4Na, 8);
+        for (int depth = 0, maxDepth = litShadowInfoArrayLv3.depth; depth < maxDepth; depth++)
+        {
+            var subArray = litShadowInfoArrayLv3Na.GetSubArray(depth * voxelAreaLv3, voxelAreaLv3);
+            litShadowInfoArrayLv3.SetPixelData<byte>(subArray, 0, depth);
+        }
         litShadowInfoArrayLv3.Apply(false, false);
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
-        DownSample(lv2VoxelSize, lv3VoxelSize, litShadowInfoArrayLv2, litShadowInfoArrayLv3);
+        DownSample(lv2VoxelSize, lv3VoxelSize, litShadowInfoArrayLv2Na, litShadowInfoArrayLv3Na);
+        for (int depth = 0, maxDepth = litShadowInfoArrayLv2.depth; depth < maxDepth; depth++)
+        {
+            var subArray = litShadowInfoArrayLv2Na.GetSubArray(depth * voxelAreaLv2, voxelAreaLv2);
+            litShadowInfoArrayLv2.SetPixelData<byte>(subArray, 0, depth);
+        }
         litShadowInfoArrayLv2.Apply(false, false);
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
-        DownSample(rootVoxelSize, lv2VoxelSize, litShadowInfoArrayLv1, litShadowInfoArrayLv2);
+        DownSample(rootVoxelSize, lv2VoxelSize, litShadowInfoArrayLv1Na, litShadowInfoArrayLv2Na);
+        for (int depth = 0, maxDepth = litShadowInfoArrayLv1.depth; depth < maxDepth; depth++)
+        {
+            var subArray = litShadowInfoArrayLv1Na.GetSubArray(depth * voxelAreaLv1, voxelAreaLv1);
+            litShadowInfoArrayLv1.SetPixelData<byte>(subArray, 0, depth);
+        }
         litShadowInfoArrayLv1.Apply(false, false);
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
@@ -238,6 +245,7 @@ public partial class ShadowmapBaker
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
+
         // calculate intersected lv1 voxel count, to construct a lv2 info map
         int lv1IntersectedCount = 0;
         for (int dVoxelIndex = 0, dVoxelMax = rootVoxelSize; dVoxelIndex < dVoxelMax; dVoxelIndex++)
@@ -246,7 +254,7 @@ public partial class ShadowmapBaker
             for (int pixelIdx = 0, pixelMax = litShadowInfoLv1.Length; pixelIdx < pixelMax; pixelIdx++)
             {
                 Vector4 value = litShadowInfoLv1[pixelIdx];
-                if (Mathf.Abs(value.x - 0.5f) < 0.1f)
+                if (Mathf.Abs(value.w - 0.5f) < 0.1f)
                 {
                     lv1IntersectedCount++;
                 }
@@ -307,190 +315,172 @@ public partial class ShadowmapBaker
         int texDepth = queryIdx / 32;
         Color[] colorBlock32x32 = new Color[32 * 32];
 
-        bool[] axeAllLitFront = new bool[4] { true, true, true, true };
-        bool[] axeAllShadowFront = new bool[4] { true, true, true, true };
-        bool[] axeIntersectedFront = new bool[4] { true, true, true, true };
-        bool[] axeAllLitBack = new bool[4] { true, true, true, true };
-        bool[] axeAllShadowBack = new bool[4] { true, true, true, true };
-        bool[] axeIntersectedBack = new bool[4] { true, true, true, true };
-
-        for (int dVoxelIndex = 0, dVoxelMax = rootVoxelSize; dVoxelIndex < dVoxelMax; dVoxelIndex++)
+        //bool[] axeAllLitFront = new bool[4] { true, true, true, true };
+        //bool[] axeAllShadowFront = new bool[4] { true, true, true, true };
+        //bool[] axeIntersectedFront = new bool[4] { true, true, true, true };
+        //bool[] axeAllLitBack = new bool[4] { true, true, true, true };
+        //bool[] axeAllShadowBack = new bool[4] { true, true, true, true };
+        //bool[] axeIntersectedBack = new bool[4] { true, true, true, true };
+        unsafe
         {
-            var litShadowInfoLv1 = litShadowInfoArrayLv1.GetPixels(dVoxelIndex);
-
-            //for (int dVoxelIndexLv2 = 0, dVoxelMaxLv2 = 2; dVoxelIndexLv2 < dVoxelMaxLv2; dVoxelIndexLv2++)
-            //{
-            var litShadowInfoLv2_front = litShadowInfoArrayLv2.GetPixels(2 * dVoxelIndex);
-            var litShadowInfoLv2_back = litShadowInfoArrayLv2.GetPixels(2 * dVoxelIndex + 1);
-            //}
-            var litShadowInfoLv3_front = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex);
-            var litShadowInfoLv3_mid1 = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex + 1);
-            var litShadowInfoLv3_mid2 = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex + 2);
-            var litShadowInfoLv3_back = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex + 3);
-            for (int vVoxelIndex = 0, vVoxelMax = rootVoxelSize; vVoxelIndex < vVoxelMax; vVoxelIndex++)
+            for (int dVoxelIndex = 0, dVoxelMax = rootVoxelSize; dVoxelIndex < dVoxelMax; dVoxelIndex++)
             {
-                for (int uVoxelIndex = 0, uVoxelMax = rootVoxelSize; uVoxelIndex < uVoxelMax; uVoxelIndex++)
+                var litShadowInfoLv1 = litShadowInfoArrayLv1.GetPixels(dVoxelIndex);
+
+                //for (int dVoxelIndexLv2 = 0, dVoxelMaxLv2 = 2; dVoxelIndexLv2 < dVoxelMaxLv2; dVoxelIndexLv2++)
+                //{
+                var litShadowInfoLv2_front = litShadowInfoArrayLv2.GetPixels(2 * dVoxelIndex);
+                var litShadowInfoLv2_back = litShadowInfoArrayLv2.GetPixels(2 * dVoxelIndex + 1);
+                //}
+                //var litShadowInfoLv3_front = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex);
+                Color* litShadowInfoLv3_front = null;
+                fixed (Color* litShadowInfoLv3_front_fixed = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex))
+                    litShadowInfoLv3_front = litShadowInfoLv3_front_fixed;
+                Color* litShadowInfoLv3_mid1 = null;
+                fixed (Color* litShadowInfoLv3_mid1_fixed = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex + 1))
+                    litShadowInfoLv3_mid1 = litShadowInfoLv3_mid1_fixed;
+                var litShadowInfoLv3_mid2 = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex + 2);
+                var litShadowInfoLv3_back = litShadowInfoArrayLv3.GetPixels(4 * dVoxelIndex + 3);
+
+                for (int vVoxelIndex = 0, vVoxelMax = rootVoxelSize; vVoxelIndex < vVoxelMax; vVoxelIndex++)
                 {
-                    var lv1 = litShadowInfoLv1[vVoxelIndex * uVoxelMax + uVoxelIndex];
-                    var lvIndexMapIndex = dVoxelIndex * vVoxelMax * uVoxelMax + vVoxelIndex * uVoxelMax + uVoxelIndex;
-                    var lvIndexMapY = lvIndexMapIndex / litShadowInfoIndexMapSize;
-                    var lvIndexMapX = lvIndexMapIndex % litShadowInfoIndexMapSize;
-                    // if lv1 voxel is intersected
-                    if (Mathf.Abs(lv1.r - 0.5f) < 0.1f)
+                    for (int uVoxelIndex = 0, uVoxelMax = rootVoxelSize; uVoxelIndex < uVoxelMax; uVoxelIndex++)
                     {
-                        // litShadowInfoMap.SetPixel(0, queryIdx, new Color(lv1.r, 0,0,0 ), 0);
-                        int seq = 0;
-                        int lv2MemLocBase = (vVoxelIndex * uVoxelMax + uVoxelIndex) * 4;
-                        //var lv2FrontRGBA = new Color();
-                        //var lv2BackRGBA = new Color();
-
-                        for (int vPixelIndex = 0, vPixelMax = 2; vPixelIndex < vPixelMax; vPixelIndex++)
+                        var lv1 = litShadowInfoLv1[vVoxelIndex * uVoxelMax + uVoxelIndex];
+                        var lvIndexMapIndex = dVoxelIndex * vVoxelMax * uVoxelMax + vVoxelIndex * uVoxelMax + uVoxelIndex;
+                        var lvIndexMapY = lvIndexMapIndex / litShadowInfoIndexMapSize;
+                        var lvIndexMapX = lvIndexMapIndex % litShadowInfoIndexMapSize;
+                        // if lv1 voxel is intersected
+                        if (Mathf.Abs(lv1.a - 0.5f) < 0.1f)
                         {
-                            for (int uPixelIndex = 0, uPixelMax = 2; uPixelIndex < uPixelMax; uPixelIndex++)
+                            // litShadowInfoMap.SetPixel(0, queryIdx, new Color(lv1.r, 0,0,0 ), 0);
+                            int lv2MemLocBase = (vVoxelIndex * uVoxelMax + uVoxelIndex) * 4;
+                            //var lv2FrontRGBA = new Color();
+                            //var lv2BackRGBA = new Color();
+
+                            for (int vPixelIndex = 0, vPixelMax = 2; vPixelIndex < vPixelMax; vPixelIndex++)
                             {
-                                int vFinal = (vVoxelIndex * uVoxelMax * 4) + uVoxelIndex * 2 + vPixelIndex * uVoxelMax * 2 + uPixelIndex;
-                                var lv2_front = Color.black;
-                                var lv2_back = Color.black;
-                                try
+                                for (int uPixelIndex = 0, uPixelMax = 2; uPixelIndex < uPixelMax; uPixelIndex++)
                                 {
-                                    lv2_front = litShadowInfoLv2_front[vFinal];
-                                    lv2_back = litShadowInfoLv2_back[vFinal];
-                                }
-                                catch (System.IndexOutOfRangeException e)
-                                {
-                                    Debug.Log(vFinal);
-                                    Debug.Log(litShadowInfoLv2_front.Length);
-                                }
-                                Color frontColor = lv2_front;
-                                Color backColor = lv2_back;
-
-                                if (((Mathf.Abs(frontColor.r - 1) < 0.1f && Mathf.Abs(backColor.r - 1) < 0.1f) ||
-                                    (Mathf.Abs(frontColor.r - 0) < 0.1f && Mathf.Abs(backColor.r - 0) < 0.1f)))
-                                {
-
-                                    Color colorLv3 = new Color(frontColor.r, frontColor.r, frontColor.r, frontColor.r);
-                                    for (int vPixelIndexLv3 = 0, vPixelMaxLv3 = 2; vPixelIndexLv3 < vPixelMaxLv3; vPixelIndexLv3++)
+                                    int vFinal = (vVoxelIndex * uVoxelMax * 4) + uVoxelIndex * 2 + vPixelIndex * uVoxelMax * 2 + uPixelIndex;
+                                    var lv2_front = Color.black;
+                                    var lv2_back = Color.black;
+                                    try
                                     {
-                                        for (int uPixelIndexLv3 = 0, uPixelMaxLv3 = 2; uPixelIndexLv3 < uPixelMaxLv3; uPixelIndexLv3++)
-                                        {
-                                            int pixelIdx = 8 * vPixelIndex + uPixelIndex * 4 + 2 * vPixelIndexLv3 + uPixelIndexLv3;
-                                            colorBlock32x32[queryIdx % 32 * 32 + pixelIdx] = colorLv3;
+                                        lv2_front = litShadowInfoLv2_front[vFinal];
+                                        lv2_back = litShadowInfoLv2_back[vFinal];
+                                    }
+                                    catch (System.IndexOutOfRangeException e)
+                                    {
+                                        Debug.Log(vFinal);
+                                        Debug.Log(litShadowInfoLv2_front.Length);
+                                    }
+                                    Color frontColor = lv2_front;
+                                    Color backColor = lv2_back;
 
+                                    if (((Mathf.Abs(frontColor.a - 1) < 0.1f && Mathf.Abs(backColor.a - 1) < 0.1f) ||
+                                        (Mathf.Abs(frontColor.a - 0) < 0.1f && Mathf.Abs(backColor.a - 0) < 0.1f)))
+                                    {
+
+                                        Color colorLv3 = new Color(frontColor.a, frontColor.a, frontColor.a, frontColor.a);
+                                        for (int vPixelIndexLv3 = 0, vPixelMaxLv3 = 2; vPixelIndexLv3 < vPixelMaxLv3; vPixelIndexLv3++)
+                                        {
+                                            for (int uPixelIndexLv3 = 0, uPixelMaxLv3 = 2; uPixelIndexLv3 < uPixelMaxLv3; uPixelIndexLv3++)
+                                            {
+                                                int pixelIdx = 8 * vPixelIndex + uPixelIndex * 4 + 2 * vPixelIndexLv3 + uPixelIndexLv3;
+                                                colorBlock32x32[queryIdx % 32 * 32 + pixelIdx] = colorLv3;
+
+                                            }
                                         }
                                     }
-                                }
-                                else
-                                {
-                                    for (int vPixelIndexLv3 = 0, vPixelMaxLv3 = 2; vPixelIndexLv3 < vPixelMaxLv3; vPixelIndexLv3++)
+                                    else
                                     {
-                                        for (int uPixelIndexLv3 = 0, uPixelMaxLv3 = 2; uPixelIndexLv3 < uPixelMaxLv3; uPixelIndexLv3++)
+                                        for (int vPixelIndexLv3 = 0, vPixelMaxLv3 = 2; vPixelIndexLv3 < vPixelMaxLv3; vPixelIndexLv3++)
                                         {
-                                            int finalLv3Y = vVoxelIndex * 4 + vPixelIndex * 2 + vPixelIndexLv3;
-                                            int finalLv3X = uVoxelIndex * 4 + uPixelIndex * 2 + uPixelIndexLv3;
-                                            //  4 * uPixelMax  * uVoxelMax * vPixelIndex   + 4 * uVoxelIndex 
-                                            int vFinalLv3 = 4 * uVoxelMax * finalLv3Y + finalLv3X; //(vVoxelIndex * uVoxelMax * 16) +  4 * (1 - vPixelIndex) + 8 * uVoxelMax * vPixelIndex + 4 * uVoxelIndex + uPixelIndex * 2 + uPixelMax * uPixelMaxLv3 * uVoxelMax * vPixelIndexLv3 + uPixelIndexLv3;
-                                            var lv3_front = litShadowInfoLv3_front[vFinalLv3];
-                                            var lv3_mid1 = litShadowInfoLv3_mid1[vFinalLv3];
-                                            var lv3_mid2 = litShadowInfoLv3_mid2[vFinalLv3];
-                                            var lv3_back = litShadowInfoLv3_back[vFinalLv3];
-                                            bool allLitFront = axeAllLitFront[vPixelIndexLv3 * uPixelMaxLv3 + uPixelIndexLv3] = Mathf.Abs(lv3_front.r - 1) < 0.1f
-                                                && Mathf.Abs(lv3_mid1.r - 1) < 0.1f;
-                                            bool allShadowFront = axeAllShadowFront[vPixelIndexLv3 * uPixelMaxLv3 + uPixelIndexLv3] = Mathf.Abs(lv3_front.r - 0) < 0.1f &&
-                                                Mathf.Abs(lv3_mid1.r - 0) < 0.1f;
-                                            axeIntersectedFront[vPixelIndexLv3 * uPixelMaxLv3 + uPixelIndexLv3] = !allLitFront && !allShadowFront;
-                                            bool allLitBack = axeAllLitBack[vPixelIndexLv3 * uPixelMaxLv3 + uPixelIndexLv3] = Mathf.Abs(lv3_mid2.r - 1) < 0.1f &&
-                                                Mathf.Abs(lv3_back.r - 1) < 0.1f;
-                                            bool allShadowBack = axeAllShadowBack[vPixelIndexLv3 * uPixelMaxLv3 + uPixelIndexLv3] = Mathf.Abs(lv3_mid2.r - 0) < 0.1f &&
-                                                Mathf.Abs(lv3_back.r - 0) < 0.1f;
-                                            axeIntersectedBack[vPixelIndexLv3 * uPixelMaxLv3 + uPixelIndexLv3] = !allLitBack && !allShadowBack;
+                                            for (int uPixelIndexLv3 = 0, uPixelMaxLv3 = 2; uPixelIndexLv3 < uPixelMaxLv3; uPixelIndexLv3++)
+                                            {
+                                                int finalLv3Y = vVoxelIndex * 4 + vPixelIndex * 2 + vPixelIndexLv3;
+                                                int finalLv3X = uVoxelIndex * 4 + uPixelIndex * 2 + uPixelIndexLv3;
+                                                //  4 * uPixelMax  * uVoxelMax * vPixelIndex   + 4 * uVoxelIndex 
+                                                int vFinalLv3 = 4 * uVoxelMax * finalLv3Y + finalLv3X; //(vVoxelIndex * uVoxelMax * 16) +  4 * (1 - vPixelIndex) + 8 * uVoxelMax * vPixelIndex + 4 * uVoxelIndex + uPixelIndex * 2 + uPixelMax * uPixelMaxLv3 * uVoxelMax * vPixelIndexLv3 + uPixelIndexLv3;
+                                                var lv3_front = litShadowInfoLv3_front[vFinalLv3];
+                                                var lv3_mid1 = litShadowInfoLv3_mid1[vFinalLv3];
+                                                var lv3_mid2 = litShadowInfoLv3_mid2[vFinalLv3];
+                                                var lv3_back = litShadowInfoLv3_back[vFinalLv3];
+                                                
+                                        
+                                                Color colorLv3 = new Color(lv3_front.a, lv3_mid1.a, lv3_mid2.a, lv3_back.a);
+                                                // pixel u
+                                                int pixelIdx = 8 * vPixelIndex + uPixelIndex * 4 + 2 * vPixelIndexLv3 + uPixelIndexLv3;
 
-                                            Color colorLv3 = new Color(lv3_front.r, lv3_mid1.r, lv3_mid2.r, lv3_back.r);
-                                            int pixelIdx = 8 * vPixelIndex + uPixelIndex * 4 + 2 * vPixelIndexLv3 + uPixelIndexLv3;
+                                                colorBlock32x32[queryIdx % 32 * 32 + pixelIdx] = colorLv3;
+                                                // pixel u for lv4 query
+                                                int pixelIdxLv4 = 16 + pixelIdx;
 
-                                            colorBlock32x32[queryIdx % 32 * 32 + pixelIdx] = colorLv3;
+                                                for (int vPixelIndexLv4 = 0, vPixelMaxLv4 = 8; vPixelIndexLv4 < vPixelMaxLv4; vPixelMaxLv4++)
+                                                {
+                                                    for (int uPixelIndexLv4 = 0, uPixelMaxLv4 = 8; uPixelIndexLv4 < uPixelMaxLv4; uPixelIndex++)
+                                                    {
 
-
+                                                    }
+                                                }
+                                            }
                                         }
+
                                     }
 
-                                    frontColor = new Color(axeAllLitFront[0] ? 1.0f : 0.0f + (axeAllShadowFront[0] ? 0.0f : 1.0f) + (axeIntersectedFront[0] ? 0.5f : 0),
-                                        axeAllLitFront[1] ? 1 : 0 + (axeIntersectedFront[1] ? 0.5f : 0),
-                                        axeAllLitFront[2] ? 1 : 0 + (axeIntersectedFront[2] ? 0.5f : 0),
-                                        axeAllLitFront[3] ? 1 : 0 + (axeIntersectedFront[3] ? 0.5f : 0));
-                                    backColor = new Color(axeAllLitBack[0] ? 1 : 0 + (axeAllShadowBack[0] ? 0 : 1) + (axeIntersectedBack[0] ? 0.5f : 0),
-                                        axeAllLitBack[1] ? 1 : 0 + (axeIntersectedBack[1] ? 0.5f : 0),
-                                        axeAllLitBack[2] ? 1 : 0 + (axeIntersectedBack[2] ? 0.5f : 0),
-                                        axeAllLitBack[3] ? 1 : 0 + (axeIntersectedBack[3] ? 0.5f : 0));
+                                    //int seqFront = vPixelIndex * uPixelMax + uPixelIndex;
+                                    //int seqBack = seqFront + 4;
+
+
                                 }
-
-                                int seqFront = vPixelIndex * uPixelMax + uPixelIndex;
-                                int seqBack = seqFront + 4;
-
-
                             }
-                        }
 
-                        float texV = (queryIdx % 32) / 32.0f + 0.01f;  //(queryIdx % (lv1IntersectedCount * 0.5f))  / ((float)lv1IntersectedCount); //queryIdx / (float)lv1IntersectedCount;  //
-                        Vector4 v = EncodeFloatRG(texV);
+                            float texV = (queryIdx % 32) / 32.0f + 0.01f;  //(queryIdx % (lv1IntersectedCount * 0.5f))  / ((float)lv1IntersectedCount); //queryIdx / (float)lv1IntersectedCount;  //
+                            Vector4 v = EncodeFloatRG(texV);
 
-                        float arrayIndex = (queryIdx / 32) / (float)(textureArraySize - 1);
-                        Vector2 arrayIndexRG = EncodeFloatRG(arrayIndex);
-                        // R: lit or Shadow GB: v A : textureArray index  setup after lv2 info summarized
-                        litShadowInfoIndexMap.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.r, texV, arrayIndexRG.x, arrayIndexRG.y));// //new Color(lv1.r, v.x, v.y, isHalf), 0);
+                            float arrayIndex = (queryIdx / 32) / (float)(textureArraySize - 1);
+                            Vector2 arrayIndexRG = EncodeFloatRG(arrayIndex);
+                            // R: lit or Shadow GB: v A : textureArray index  setup after lv2 info summarized
+                            
+                            litShadowInfoIndexMap.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.a, texV, arrayIndexRG.x, arrayIndexRG.y));// //new Color(lv1.a, v.x, v.y, isHalf), 0);
 
+#if !_ENABLE_BIG_TEX
                         texV = (queryIdx % (lv1IntersectedCount / 2)) / (float)lv1IntersectedCount;
                         float isHalf = queryIdx > lv1IntersectedCount / 2 ? 1 : 0;
                         v = EncodeFloatRG(texV);
-                        litShadowInfoIndexMapNoTextureArray.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.r, isHalf, v.x, v.y));
-
-                        //for (int i = 0; i < 16; i++)
-                        //{
-                        //    litShadowInfoMap.SetPixel(seq, queryIdx, lv2FrontRGBA, 0);
-                        //    seq++;
-                        //    litShadowInfoMap.SetPixel(seq, queryIdx, lv2BackRGBA, 0);
-                        //    seq++;
-                        //}
-
-                        // lv3
-                        /*
-                        for(int vPixelIndex = 0,vPixelMax = 4; vPixelIndex < vPixelMax; vPixelIndex++)
-                        {
-                            for (int uPixelIndex = 0, uPixelMax = 4; uPixelIndex < uPixelMax; uPixelIndex++)
-                            {
-                                var lv3_front = litShadowInfoLv3_front[vPixelIndex * uPixelMax + uPixelIndex];
-                                var lv3_mid1 = litShadowInfoLv3_mid1[vPixelIndex * uPixelMax + uPixelIndex];
-                                var lv3_mid2 = litShadowInfoLv3_mid2[vPixelIndex * uPixelMax + uPixelIndex];
-                                var lv3_back = litShadowInfoLv3_back[vPixelIndex * uPixelMax + uPixelIndex];
-                            }
-                        }
-                        */
-
-#if _ENABLE_BIG_TEX
-                        queryIdx++;
-                        if (texDepth != queryIdx / 32)
-                        {
-                            litShadowInfoMapArrayLv3.SetPixels(colorBlock32x32, texDepth, 0);
-                            texDepth = queryIdx / 32;
-                            // colorBlock32x32 = litShadowInfoMapArrayLv3.GetPixels(texDepth, 0);
-
-                        }
+                        litShadowInfoIndexMapNoTextureArray.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.a, isHalf, v.x, v.y));
 #endif
 
-                    }
-                    else
-                    {
-                        Vector4 v = EncodeFloatRG(lv1.r > 0.9 ? 20000 : 10000);
-                        litShadowInfoIndexMap.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.r, 0, 0, 0), 0);
-                        litShadowInfoIndexMapNoTextureArray.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.r, 0, 0, 0), 0);
+#if _ENABLE_BIG_TEX
+                            queryIdx++;
+                            if (texDepth != queryIdx / 32)
+                            {
+                                litShadowInfoMapArrayLv3.SetPixels(colorBlock32x32, texDepth, 0);
+                                texDepth = queryIdx / 32;
+                                // colorBlock32x32 = litShadowInfoMapArrayLv3.GetPixels(texDepth, 0);
+
+                            }
+#endif
+
+                        }
+                        else
+                        {
+                            Vector4 v = EncodeFloatRG(lv1.a > 0.9 ? 20000 : 10000);
+                            litShadowInfoIndexMap.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.a, 0, 0, 0), 0);
+#if !_ENABLE_BIG_TEX
+                        litShadowInfoIndexMapNoTextureArray.SetPixel(lvIndexMapX, lvIndexMapY, new Color(lv1.a, 0, 0, 0), 0);
+#endif
+                        }
                     }
                 }
+
+
+                Resources.UnloadUnusedAssets();
+                System.GC.Collect();
+                //AssetDatabase.DeleteAsset("Assets/runtimeLitShadowInfo.asset");
+                //AssetDatabase.CreateAsset(litShadowInfoMap, "Assets/runtimeLitShadowInfo.asset");
             }
-
-
-            Resources.UnloadUnusedAssets();
-            System.GC.Collect();
-            //AssetDatabase.DeleteAsset("Assets/runtimeLitShadowInfo.asset");
-            //AssetDatabase.CreateAsset(litShadowInfoMap, "Assets/runtimeLitShadowInfo.asset");
         }
 
         //if(EditorUtility.DisplayDialog("选择保存目录", "", ""))
@@ -520,87 +510,11 @@ public partial class ShadowmapBaker
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
 
         System.GC.Collect();
-#if _GEN_SCALED_TEX
-#endif
-#if !_ENABLE_BIG_TEX
-        int scaleLv2Fact = 32;
-        // scaled lv2 textureArray
-#if _GEN_SCALED_TEX
-        Texture2DArray scaledTextureArray = new Texture2DArray(scaleLv2Fact * litShadowInfoMapArray.width,
-            scaleLv2Fact * litShadowInfoMapArray.height,
-            litShadowInfoMapArray.depth,
-            TextureFormat.RGBA32, false,
-            true);
-#endif
-
-        int blockMaxIdx = lv1IntersectedCount / 32 + (lv1IntersectedCount % 32) > 0 ? 1 : 0;// litShadowInfoMap.height / 32 + (litShadowInfoMap.height % 32 > 0 ? 1:0);
-        blockMaxIdx = Mathf.Min(blockMaxIdx, textureArraySize);
-        for (int blockIdx = 0; blockIdx < blockMaxIdx; blockIdx++)
-        {
-            var colorBlock = litShadowInfoMap.GetPixels(0, 32 * blockIdx, 32, 32, 0);
-            litShadowInfoMapArray.SetPixels(colorBlock, blockIdx, 0);
-#if _ENABLE_LV3_MODE
-            var colorBlockLv3 = litShadowInfoMapLv3.GetPixels(0, 32 * blockIdx, 32, 32, 0);
-            litShadowInfoMapArrayLv3.SetPixels(colorBlockLv3, blockIdx, 0);
-#endif
-#if _GEN_SCALED_TEX
-            var colorBlockScaled = scaledTextureArray.GetPixels(blockIdx);
-            int colIdx64 = 0;
-            int colIdx32 = 0;
-            try
-            {
-               
-                for (int vIdx = 0, vMax = scaledTextureArray.width; vIdx < vMax; vIdx++)
-                {
-                    for (int uIdx = 0, uMax = scaledTextureArray.height; uIdx < uMax; uIdx++)
-                    {
-                        colIdx64 = vIdx * uMax + uIdx;
-                        colIdx32 = uMax / scaleLv2Fact * (vIdx / scaleLv2Fact) + uIdx / scaleLv2Fact;
-
-                        colorBlockScaled[colIdx64] = colorBlock[colIdx32];
-                    }
-
-                }
-            }
-            catch (System.IndexOutOfRangeException e)
-            {
-                Debug.Log(string.Format("colIdx64:{0} colIdx32:{1}", colIdx64, colIdx32));
-            }
-            scaledTextureArray.SetPixels(colorBlockScaled, blockIdx, 0);
-#endif
-        }
-
-#if _GEN_SCALED_TEX
-        scaledTextureArray.Apply(false, false);
-        AssetDatabase.CreateAsset(scaledTextureArray, "Assets/litShadowInfoArrayScaled.asset");
-#endif
-
-#endif
 
         litShadowInfoMapArrayLv3.Apply(false, false);
         litShadowInfoMapArrayLv3.wrapMode = TextureWrapMode.Clamp;
         litShadowInfoMapArrayLv3.filterMode = FilterMode.Point;
         AssetDatabase.CreateAsset(litShadowInfoMapArrayLv3, parentPath + "/litShadowInfoMapArrayLv3.asset");
-
-        /*
-        int scaleFact = 16;
-        Texture2D scaledLv1Texture = new Texture2D(litShadowInfoIndexMap.width * scaleFact, litShadowInfoIndexMap.height * scaleFact, TextureFormat.RGBA32, false, true);
-        var colorBlockOriginLv1 = litShadowInfoIndexMap.GetPixels(0);
-        var colorBlockScaledLv1 = scaledLv1Texture.GetPixels(0);
-        for (int vIdx=0,vIdxMax = scaledLv1Texture.height; vIdx < vIdxMax; vIdx++)
-        {
-            for(int uIdx = 0,uIdxMax = scaledLv1Texture.width; uIdx< uIdxMax; uIdx++)
-            {
-                int colIdxLarge = vIdx * uIdxMax + uIdx;
-                int colIdxSmall = vIdx / scaleFact * uIdxMax / scaleFact + uIdx / scaleFact;
-                colorBlockScaledLv1[colIdxLarge] = colorBlockOriginLv1[colIdxSmall];
-            }
-        }
-        scaledLv1Texture.SetPixels(colorBlockScaledLv1, 0);
-        scaledLv1Texture.Apply(true, true);
-        AssetDatabase.CreateAsset(scaledLv1Texture, "Assets/litShadowInfoLv1_Scaled.asset");
-        //litShadowInfoMapArray.SetPixels(arrayColors, arrayIdx + 1);
-        */
 
         litShadowInfoMapArray.Apply(false, false);
         AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
@@ -608,11 +522,6 @@ public partial class ShadowmapBaker
         {
             litShadowInfoMapArray.wrapMode = TextureWrapMode.Clamp;
             litShadowInfoMapArray.filterMode = FilterMode.Point;
-            //AssetDatabase.CreateAsset(litShadowInfoMapArray, "Assets/litShadowInfoArray.asset");
-            //var importer = TextureImporter.GetAtPath("Assets/litShadowInfoArray.asset") as AssetImporter;
-            //importer.filterMode = FilterMode.Point;
-            //importer.wrapMode = TextureWrapMode.Clamp;
-            //importer.SaveAndReimport();
         }
         AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
@@ -677,22 +586,39 @@ public partial class ShadowmapBaker
         DestroyImmediate(go);
 
 
-        //AssetDatabase.CreateAsset(vxShadowmapPrefab, parentPath + "/vxShadowmap.prefab");
+    }
 
-        // System.IO.File.WriteAllBytes(Application.dataPath + "/litShadowInfoLv1.tga", litShadowInfoIndexMap.EncodeToTGA());
-        // System.IO.File.WriteAllBytes(Application.dataPath + "/litShadowInfoLv1.png", litShadowInfoIndexMap.EncodeToPNG());
+    [MenuItem("Tools/TestAlpha8")]
+    public static void TestAlpha8()
+    {
+        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(64, 64, 64, TextureFormat.Alpha8, false, true);
+        var na = new NativeArray<byte>(64 * 64 * 64, Allocator.Temp);
+        var subArray = na.GetSubArray(1024, 2048);
+        int maxDepth = litShadowInfoArrayLv2.depth;
+        var task = Task.Run(() =>
+        {
+            for (int i = 0, c = subArray.Length; i < c; i++)
+            {
+                subArray[i] = 128;
+            }
+            litShadowInfoArrayLv2.SetPixelData<byte>(na, 0, maxDepth - 1);
+        });
+        task.Wait();
+        AssetDatabase.CreateAsset(litShadowInfoArrayLv2, "Assets/TestSubArray.asset");
 
-        // System.IO.File.WriteAllBytes(Application.dataPath + "/litShadowInfoLv1NoTexArray.tga", litShadowInfoIndexMapNoTextureArray.EncodeToTGA());
+    }
 
-#if !_ENABLE_BIG_TEX
-        System.IO.File.WriteAllBytes(Application.dataPath + "/litShadowInfoLv2.tga", litShadowInfoMap.EncodeToTGA());
-        System.IO.File.WriteAllBytes(Application.dataPath + "/litShadowInfoLv2.png", litShadowInfoMap.EncodeToPNG());
+    struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch
+    {
+        public void Execute(int index)
+        {
+            throw new NotImplementedException();
+        }
 
-#endif
-
-
-        //var cmb = CommandBufferPool.Get();
-        //Graphics.ExecuteCommandBuffer(cmb);
+        public void Execute(int startIndex, int count)
+        {
+            throw new NotImplementedException();
+        }
     }
 
 }

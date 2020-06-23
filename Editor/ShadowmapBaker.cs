@@ -6,6 +6,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs.LowLevel.Unsafe;
 using UnityEditor;
@@ -14,7 +15,7 @@ using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
 
-public class ShadowmapBaker : UnityEditor.EditorWindow
+public partial class ShadowmapBaker : UnityEditor.EditorWindow
 {
     public enum RenderMode
     {
@@ -211,6 +212,14 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
             }
             lastClickTime = DateTime.Now.Second;
         }
+        if (GUILayout.Button("Precompute voxel depth old") && lastClickTime != DateTime.Now.Second)
+        {
+            if (UnityEditor.EditorUtility.DisplayDialog("precompute", "will precompute?", "ok", "cancel"))
+            {
+                precomputeVoxelDepthOld();
+            }
+            lastClickTime = DateTime.Now.Second;
+        }
 
         if (GUILayout.Button("Bake") && lastClickTime != DateTime.Now.Second)
         {
@@ -369,7 +378,7 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
                 });
 
 #else
-                tex = new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.RGBA32, false, true);
+                tex = new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.Alpha8, false, true);
                 var activeTmp = RenderTexture.active;
                 RenderTexture.active = tmpRt;
                 tex.ReadPixels(new Rect(0, 0, shadowMap.width, shadowMap.height), 0, 0, false);
@@ -827,7 +836,7 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
                     var litInfoFront = sliceFront[idx];
                     var litInfoBack = sliceBack != null ? sliceBack[idx] : Color.black;
 
-                    if (!pixelMask[idx] && Mathf.Abs(litInfoFront.r - 0.5f) < 0.2) //&& (sliceBack == null || litInfoBack.r < 0.2f )
+                    if (!pixelMask[idx] && Mathf.Abs(litInfoFront.a - 0.5f) < 0.2) //&& (sliceBack == null || litInfoBack.a < 0.2f )
                     {
                         if (bSetTopIntersectedVoxelLit)
                             pixelMask[idx] = true;
@@ -835,7 +844,7 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
                         sliceChanged = true;
                     }
                     if (bSetTopIntersectedVoxelLit)
-                        pixelMask[idx] |= Mathf.Abs(litInfoFront.r - 0.5f) < 0.2;
+                        pixelMask[idx] |= Mathf.Abs(litInfoFront.a - 0.5f) < 0.2;
                 }
             }
             if (sliceChanged)
@@ -846,7 +855,7 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
 
     // compute voxel on cpu 
     // compute lv3 lit or shadow info first, then summary to lv2 and rootLv1
-    void precomputeVoxelDepth()
+    void precomputeVoxelDepthOld()
     {
         //List<Color32> map1Colors = new List<Color32>();
         //List<Color32> map2Colors = new List<Color32>();
@@ -876,9 +885,9 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
         int resultTextureSize = lv3VoxelSize;
         // int resultMaxBlockCount = 256 / lv3VoxelSize;
         // Texture2D litShadowInfoMap = new Texture2D(resultTextureSize, resultTextureSize, TextureFormat.ARGB32, false, true);
-        Texture2DArray litShadowInfoArrayLv3 = new Texture2DArray(resultTextureSize, resultTextureSize, resultTextureSize, TextureFormat.RGBA32, false, true);
-        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(lv2VoxelSize, lv2VoxelSize, lv2VoxelSize, TextureFormat.RGBA32, false, true);
-        Texture2DArray litShadowInfoArrayRoot = new Texture2DArray(rootVoxelSize, rootVoxelSize, rootVoxelSize, TextureFormat.RGBA32, false, true);
+        Texture2DArray litShadowInfoArrayLv3 = new Texture2DArray(resultTextureSize, resultTextureSize, resultTextureSize, TextureFormat.RGB24, false, true);
+        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(lv2VoxelSize, lv2VoxelSize, lv2VoxelSize, TextureFormat.RGB24, false, true);
+        Texture2DArray litShadowInfoArrayRoot = new Texture2DArray(rootVoxelSize, rootVoxelSize, rootVoxelSize, TextureFormat.RGB24, false, true);
 
         List<Object> resourceToRelease = new List<Object>();
 
@@ -892,6 +901,7 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
         for (int dVoxelIndex = 0, dVoxelMaxIndex = lv3VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
         {
             var voxelLitShadowInfo = AssetDatabase.LoadAssetAtPath<Texture2D>(string.Format("Assets/litshadowmap/voxel_lv_{0}.asset", dVoxelIndex));
+            bool isAlpha8 = voxelLitShadowInfo.format == TextureFormat.Alpha8;
             resourceToRelease.Add(voxelLitShadowInfo);
             if (voxelLitShadowInfo == null)
             {
@@ -915,7 +925,8 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
             //}
             #endregion
             var blockPixels = litShadowInfoArrayLv3.GetPixels(dVoxelIndex, 0);
-            var voxelLitShadowInfoNA = voxelLitShadowInfo.GetRawTextureData<Color32>();
+            var voxelLitShadowInfoColorNA = voxelLitShadowInfo.GetRawTextureData<Color32>();
+            var voxelLitShadowInfoNA = voxelLitShadowInfo.GetRawTextureData<byte>();
             float startTime = Time.realtimeSinceStartup;
 
 
@@ -945,7 +956,13 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
                 int errorIndex = 0;
                 unsafe
                 {
-                    Color32* voxelLitShadowInfoPtr = (Color32*)voxelLitShadowInfoNA.GetUnsafePtr<Color32>(); // .GetUnsafePtr<Color>();
+                    Color32* voxelLitShadowInfoPtr = null;
+                    byte* alpha8 = null;
+                    if (isAlpha8)
+                        alpha8 = (byte*)voxelLitShadowInfoNA.GetUnsafePtr<byte>();
+                    else
+                        voxelLitShadowInfoPtr = (Color32*)voxelLitShadowInfoColorNA.GetUnsafePtr<Color32>();
+
                     for (int vBlockIndex = 0, vBlockIdxMax = lv3VoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
                     {
                         for (int uBlockIndex = 0, uBlockIdxMax = lv3VoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
@@ -963,11 +980,11 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
                                     //vPixel = vBlockIndex * uBlockIdxMax * lv3PixelPerVoxel * lv3PixelPerVoxel;
                                     int uPixel = uPixelBase + uPixelSub;
 
-                                    var pixel = voxelLitShadowInfoPtr[vPixel * width + uPixel];// voxelLitShadowInfo.GetPixel(uPixel, vPixel, 0);
+                                    var pixel = isAlpha8 ? alpha8[vPixel * width + uPixel] / 255 : voxelLitShadowInfoPtr[vPixel * width + uPixel].r;
                                     errorIndex = vPixel * width + uPixel;
-                                    var isWhite = Mathf.Abs(pixel.r - 1) < 0.1f;
-                                    var isBlack = Mathf.Abs(pixel.r - 0) < 0.1f;
-                                    var isGray = Mathf.Abs(pixel.r - 0.5f) < 0.1f;
+                                    var isWhite = Mathf.Abs(pixel - 1) < 0.1f;
+                                    var isBlack = Mathf.Abs(pixel - 0) < 0.1f;
+                                    var isGray = Mathf.Abs(pixel - 0.5f) < 0.1f;
                                     isBlockLit &= isWhite;
                                     isBlockShadow &= isBlack;
                                 }
@@ -1262,9 +1279,6 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
         }
 
         litShadowInfoMapArray.Apply();
-
-
-        //AssetDatabase.CreateAsset(litShadowInfoMap, "Assets/black.asset");
 
 
         // bake lit shadow info to texture
@@ -1693,9 +1707,93 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
         //Graphics.ExecuteCommandBuffer(cmb);
     }
 
-    private void DownSample(int targetVoxelSize, int originVoxelSize, Texture2DArray targetLitShadowInfoArray,
-        Texture2DArray originLitShadowInfoArray)
+
+    private void DownSample(int targetVoxelSize, int originVoxelSize, NativeArray<byte> targetLitShadowInfoArray,
+         NativeArray<byte> originLitShadowInfoArray, int kernelSize = 2 /* 2 * 2 */)
     {
+        UnityEngine.Assertions.Assert.AreEqual(originVoxelSize / targetVoxelSize, kernelSize, "## Downsample error, kernelSize is not valid.");
+        List<Task> pendingTask = new List<Task>();
+        List<Task> pendingTask1 = new List<Task>();
+        var mainThread = System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext();
+        int originAreaSize = originVoxelSize * originVoxelSize;
+        int targetAreaSize = targetVoxelSize * targetVoxelSize;
+        // summary to root
+        for (int dBlockIndex = 0, dBlockIdxMax = targetVoxelSize; dBlockIndex < dBlockIdxMax; dBlockIndex++)
+        {
+            int dBlockIndexTmp = dBlockIndex;
+            var lv1BlockPixels = targetLitShadowInfoArray.GetSubArray(dBlockIndex * targetAreaSize, targetAreaSize); // targetLitShadowInfoArray.Slice(dBlockIndex * targetAreaSize, targetAreaSize);
+            //var lv2BlockPixelsFront = originLitShadowInfoArray.Slice(dBlockIndex * areaSize); //.GetPixels(kernelSize * dBlockIndex);
+            //var lv2BlockPixelsBack = originLitShadowInfoArray.GetPixels(kernelSize * dBlockIndex + 1);
+            List <NativeSlice<byte>> subDepths = new List<NativeSlice<byte>>();
+            for (int subDepthIdx = 0; subDepthIdx < kernelSize; subDepthIdx++)
+            {
+                subDepths.Add(originLitShadowInfoArray.Slice<byte>((kernelSize * dBlockIndex + subDepthIdx) * originAreaSize, originAreaSize));
+            }
+
+            var task = Task.Run(() =>
+            {
+                for (int vBlockIndex = 0, vBlockIdxMax = targetVoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
+                {
+                    for (int uBlockIndex = 0, uBlockIdxMax = targetVoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
+                    {
+                        int uPixelBase = kernelSize * uBlockIndex;
+                        int vPixelBase = kernelSize * vBlockIndex;
+                        // voxel : 2*2*2 lv3
+                        bool isAllDepthWhite = true;
+                        bool isAllDepthBlack = true;
+                        for (int vPixelSub = 0, vPixelMax = kernelSize; vPixelSub < vPixelMax; vPixelSub++)
+                        {
+                            for (int uPixelSub = 0, uPixelMax = kernelSize; uPixelSub < uPixelMax; uPixelSub++)
+                            {
+                                int vPixel = vPixelBase + vPixelSub;
+                                int uPixel = uPixelBase + uPixelSub;
+
+                                isAllDepthWhite &= subDepths.TrueForAll((b) =>
+                                {
+                                    return Mathf.Abs(b[vPixel * originVoxelSize + uPixel] / 255.0f - 1) < 0.1f;
+                                });
+                                isAllDepthBlack  &= subDepths.TrueForAll((b) =>
+                                {
+                                    return Mathf.Abs(b[vPixel * originVoxelSize + uPixel] / 255.0f) < 0.1f;
+                                });
+                            }
+                        }
+                        bool isBlockIntersection = !isAllDepthWhite && !isAllDepthBlack;
+                        var blockResult = (isAllDepthWhite ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
+                        lv1BlockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = (byte)Mathf.RoundToInt(blockResult * 255);
+                    }
+                }
+            });
+            //var task1 = new Task(() =>
+            //{
+            //    targetLitShadowInfoArray.(lv1BlockPixels, dBlockIndexTmp, 0);
+            //});
+
+            pendingTask.Add(task);
+            if(pendingTask.Count > 16)
+            {
+                Task.WaitAll(pendingTask.ToArray());
+                pendingTask.Clear();
+            }
+            //pendingTask1.Add(task1);
+
+        }
+
+        Task.WaitAll(pendingTask.ToArray());
+        //pendingTask1.ForEach((t) =>
+        //{
+        //    t.RunSynchronously();
+        //});
+        Resources.UnloadUnusedAssets();
+        System.GC.Collect();
+    }
+
+
+    private void DownSample(int targetVoxelSize, int originVoxelSize, Texture2DArray targetLitShadowInfoArray,
+        Texture2DArray originLitShadowInfoArray, int kernelSize = 2 /* 2 * 2 */)
+    {
+        bool isAlpha8 = ((targetLitShadowInfoArray.format == TextureFormat.Alpha8) || (originLitShadowInfoArray.format == TextureFormat.Alpha8));
+        UnityEngine.Assertions.Assert.AreEqual(originVoxelSize / targetVoxelSize, kernelSize, "## Downsample error, kernelSize is not valid.");
         List<Task> pendingTask = new List<Task>();
         List<Task> pendingTask1 = new List<Task>();
         var mainThread = System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext();
@@ -1704,8 +1802,8 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
         {
             int dBlockIndexTmp = dBlockIndex;
             var lv1BlockPixels = targetLitShadowInfoArray.GetPixels(dBlockIndex);
-            var lv2BlockPixelsFront = originLitShadowInfoArray.GetPixels(2 * dBlockIndex);
-            var lv2BlockPixelsBack = originLitShadowInfoArray.GetPixels(2 * dBlockIndex + 1);
+            var lv2BlockPixelsFront = originLitShadowInfoArray.GetPixels(kernelSize * dBlockIndex);
+            var lv2BlockPixelsBack = originLitShadowInfoArray.GetPixels(kernelSize * dBlockIndex + 1);
 
             var task = Task.Run(() =>
             {
@@ -1713,25 +1811,25 @@ public class ShadowmapBaker : UnityEditor.EditorWindow
                 {
                     for (int uBlockIndex = 0, uBlockIdxMax = targetVoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
                     {
-                        int uPixelBase = 2 * uBlockIndex;
-                        int vPixelBase = 2 * vBlockIndex;
+                        int uPixelBase = kernelSize * uBlockIndex;
+                        int vPixelBase = kernelSize * vBlockIndex;
                         // voxel : 2*2*2 lv3
                         bool isVoxelLited = true;
                         bool isVoxelShadowed = true;
-                        for (int vPixelSub = 0, vPixelMax = 2; vPixelSub < vPixelMax; vPixelSub++)
+                        for (int vPixelSub = 0, vPixelMax = kernelSize; vPixelSub < vPixelMax; vPixelSub++)
                         {
-                            for (int uPixelSub = 0, uPixelMax = 2; uPixelSub < uPixelMax; uPixelSub++)
+                            for (int uPixelSub = 0, uPixelMax = kernelSize; uPixelSub < uPixelMax; uPixelSub++)
                             {
                                 int vPixel = vPixelBase + vPixelSub;
                                 int uPixel = uPixelBase + uPixelSub;
-                                var pixelFront = lv2BlockPixelsFront[vPixel * originVoxelSize + uPixel];
-                                var pixelBack = lv2BlockPixelsBack[vPixel * originVoxelSize + uPixel];
-                                var isWhite = Mathf.Abs(pixelFront.r - 1) < 0.1f;
-                                var isWhiteBack = Mathf.Abs(pixelBack.r - 1) < 0.1f;
-                                var isBlack = Mathf.Abs(pixelFront.r - 0) < 0.1f;
-                                var isBlackBack = Mathf.Abs(pixelBack.r - 0) < 0.1f;
-                                var isGray = Mathf.Abs(pixelFront.r - 0.5f) < 0.1f;
-                                var isGrayBack = Mathf.Abs(pixelBack.r - 0.5f) < 0.1f;
+                                var pixelFront = isAlpha8 ? lv2BlockPixelsFront[vPixel * originVoxelSize + uPixel].a : lv2BlockPixelsFront[vPixel * originVoxelSize + uPixel].r;
+                                var pixelBack = isAlpha8 ? lv2BlockPixelsBack[vPixel * originVoxelSize + uPixel].a : lv2BlockPixelsBack[vPixel * originVoxelSize + uPixel].r;
+                                var isWhite = Mathf.Abs(pixelFront - 1) < 0.1f;
+                                var isWhiteBack = Mathf.Abs(pixelBack - 1) < 0.1f;
+                                var isBlack = Mathf.Abs(pixelFront - 0) < 0.1f;
+                                var isBlackBack = Mathf.Abs(pixelBack - 0) < 0.1f;
+                                var isGray = Mathf.Abs(pixelFront - 0.5f) < 0.1f;
+                                var isGrayBack = Mathf.Abs(pixelBack - 0.5f) < 0.1f;
                                 isVoxelLited &= isWhite && isWhiteBack;
                                 isVoxelShadowed &= isBlack && isBlackBack;
                             }
