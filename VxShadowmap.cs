@@ -15,6 +15,7 @@ public class VxShadowmapUniformData
     public float _DEBUG_FACT;
     public float _level1TexSize;
     public float _level2TexArrayDepth;
+    public float _level4TexArrayDepth;
     public float _ShadowDensity;
     public float _ShadowBalance;
 
@@ -31,6 +32,8 @@ public class VxShadowmapUniformData
     public Texture _Level1IndexMap;
     [SerializeReference]
     public Texture _Level2LitShadowInfoArray;
+    [SerializeReference]
+    public Texture _Level4LitShadowInfoArray;
     [SerializeReference]
     public Texture _VoxelShadowmap;
     [SerializeReference]

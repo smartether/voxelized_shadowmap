@@ -12,6 +12,7 @@ Shader "Unlit/VxRender"
         _Level1IndexMap("Level1IndexMap", 2D) = "black" {}
         //_Level1IndexMapNoArray("Level1IndexMapNoArray", 2D) = "black" {}
         _Level2LitShadowInfoArray("Level2LitShadowInfoArray", 2DArray) = "black"{}
+        _Level4LitShadowInfoArray("Level4LitShadowInfoArray", 2DArray) = "black"{}
         //_Level2LitShadowInfo("Level2LitShadowInfo", 2D) = "black" {}
         _VoxelShadowmap("VoxelShadowmap", 2D) = "black" {}
         _Shadowmap("Shadowmap", 2D) = "black" {}
@@ -22,6 +23,7 @@ Shader "Unlit/VxRender"
         
         _level1TexSize("level1TexSize", float) = 64
         _level2TexArrayDepth("level2TexArrayDepth", float) = 32
+        _level4TexArrayDepth("level4TexArrayDepth", float) = 32
         // Debug
         // _Level1LitShadowInfoArrayDebug("_Level1LitShadowInfoArrayDebug", 2DArray) = "black"{}
         // _Level2LitShadowInfoArrayDebug("_Level2LitShadowInfoArrayDebug", 2DArray) = "black"{}

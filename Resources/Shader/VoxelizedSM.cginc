@@ -17,9 +17,10 @@
  
 
 // high precision mode
-// #define _SHADOWMAP_LITE1
+//#define _SHADOWMAP_LITE1
 // proto mode
-#define _SHADOWMAP_LITE
+//#define _SHADOWMAP_LITE
+#define _ENABLE_LV4_VOXEL
 
 // Input Macro
 
@@ -57,6 +58,7 @@ uniform float _ShadowBias;
 uniform float _ShadowBias1;
 uniform float _level1TexSize;
 uniform float _level2TexArrayDepth;
+uniform float _level4TexArrayDepth;
 float _ShadowDensity;
 float _ShadowBalance;
 
@@ -64,6 +66,7 @@ sampler2D _Level1IndexMap;
 // sampler2D _Level1IndexMapNoArray;
 // sampler2D _Level2LitShadowInfo;
 UNITY_DECLARE_TEX2DARRAY(_Level2LitShadowInfoArray);
+UNITY_DECLARE_TEX2DARRAY(_Level4LitShadowInfoArray);
 sampler2D _VoxelShadowmap;
 sampler2D _Shadowmap;
 sampler2D _VxShadow_Blur;
@@ -207,9 +210,15 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 float3 voxelPos = 0;
                 float3 voxelPosLv2 = 0;
                 float3 voxelPosLv3 = 0;
+                float voxelIdLv3 = 0;
+                float3 voxelIdLv4 = 0;
                 float3 voxelUnionPosLv2 = 0;
                 float3 voxelUnionPosLv3 = 0;
                 
+                uint3 uVoxelPos = 0;
+                uint3 uVoxelPosLv2 = 0;
+                uint3 uVoxelPosLv3 = 0;
+
 
                 float shadowAlpha = clamp(_ShadowAlpha * saturate(1 + cos(3.1415 * i.litDistance / _ProjSizeParams.z)), 0.3, 0.6);
                 #ifndef _LIT_SCREEN_SPACE_MODE
@@ -233,6 +242,7 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                         voxelPos = orthoPos.xyz / _VoxelParams.x;
                         voxelPosLv2 = orthoPos.xyz / _VoxelParamsLv2.x;
                         voxelPosLv3 = orthoPos.xyz / _VoxelParamsLv3.x;
+                        voxelIdLv4 = (voxelPosLv3 % 1.0) * 8.0;
                     #endif
                     voxelPos = floor(voxelPos);
                     voxelUnionPosLv2 = floor(voxelPosLv2 % 2);                    
@@ -265,11 +275,13 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                             voxelPosLv3 = floor(litSpaceClipPos * _VoxelParamsLv3.z);
                         }
                     #else
+                        float3 fVoxelPos = litSpaceClipPos * _VoxelParams.z;
                         voxelPos = floor(litSpaceClipPos * _VoxelParams.z);
                         voxelPosLv2 = floor(litSpaceClipPos * _VoxelParamsLv2.z);
                         voxelPosLv3 = floor(litSpaceClipPos * _VoxelParamsLv3.z);
-                        voxelPosLv2 = floor(voxelPosLv3 / 2);  
-                        voxelPos = floor(voxelPosLv2 / 2);
+                        voxelIdLv3 = floor(litSpaceClipPos.z * _VoxelParams.z % 1 * 4);
+                        voxelIdLv4 = floor(litSpaceClipPos * _VoxelParamsLv3.z % 0.5 * 2 * 8);
+                        uVoxelPosLv3 = (uint)floor(litSpaceClipPos * _VoxelParamsLv2.z);
                     #endif
                 voxelUnionPosLv2 = floor(voxelPosLv2 % 1.999); // 2.0); //
                 voxelUnionPosLv3 = floor(voxelPosLv3 % 1.999); // 2.0); //
@@ -285,6 +297,7 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 // float4 level1LitInfoNoArray = tex2Dlod(_Level1IndexMapNoArray, float4(Level1IndexMapUV, 0,0));
                 float fact = 1.0 / 1024.0;
                 float lv2MapWidth = 32.0;
+                float lv4MapWidth = 64.0;
                 float lv2U_fact = 1.0 / lv2MapWidth;
                 float v = level1LitInfo.y;// DecodeFloatRG(level1LitInfo.zw);
                 float texDepth = DecodeFloatRG(level1LitInfo.zw);
@@ -312,6 +325,7 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 float4 colorIfOneOrZero = (float4)0;
                 float4 colorIfLv23OneOrZero = (float4)0;
                 float4 colorSM = (float4)0;
+                float4 color4 = (float)0;
 
                 float4 finalCol = (float4)0;
                 
@@ -324,6 +338,10 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 v + _DEBUG_FACT,
                 round(texDepth * _level2TexArrayDepth) ), //floor(DecodeFloatRG(level1LitInfo.zw) * _level2TexArrayDepth) //
                 0);
+
+                float4 lv4uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level2LitShadowInfoArray, float3(texArrayU + 16.0 / lv2MapWidth ,
+                v,
+                round(texDepth * _level2TexArrayDepth)), 0);
 
                 int idx = floor(voxelUnionPosLv3.y * 2 + voxelUnionPosLv3.x) ;
                 idx = floor(voxelUnionPosLv2.z * 2 + voxelUnionPosLv3.z);
@@ -349,7 +367,33 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 // if(isLv1ZeroOrOne < 0.5 && isLv23ZeroOrOne < 0.5)
                 // return fixed4(1,0,0,1);
                 // #endif
+                #ifdef _ENABLE_LV4_VOXEL
+                float lv4V = DecodeFloatRG(lv4uv.rg);
+                float flv4Depth = DecodeFloatRG(lv4uv.ba);
+                float lv4Depth = round(_level4TexArrayDepth * flv4Depth);
+                float lv4UPixelOffset = voxelIdLv3;//floor(voxelPosLv3.z % 4.0);
+                float3 lv4Pos = voxelIdLv4; // floor(voxelPosLv3 / (1.0 / 8.0)); // floor(voxelIdLv4 % 7.999);
+                float lv4UPixel = lv4Pos.y * 2 + lv4Pos.x / 4 + 16 * lv4UPixelOffset;
+                //return voxelIdLv4.z / 8;
+                float lv4U = lv4UPixel / 64.0;
+                float4 lv4Color = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, float3(lv4U, lv4V , lv4Depth), 0);
                 
+                uint flag = (uint)(1 << (uint)floor(lv4Pos.z));
+                uint lvC = (uint)round(lv4Color[floor(lv4Pos.x % 4)] * 255) & flag;
+                color4 = lvC == 1 ? 1 : 0;
+                // if(lvC == 1){
+                //     return fixed4(0,0,1,1);
+                // }
+                // else{
+                //     return fixed4(1,0,0,1); 
+                // }
+                // fixed4 lv4Uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, )
+                //color4 = 1;
+                finalCol = isLv1ZeroOrOne * colorIfOneOrZero + 
+                    saturate(1 - isLv1ZeroOrOne) * isLv23ZeroOrOne * colorIfLv23OneOrZero + 
+                    saturate(1 - isLv1ZeroOrOne) * saturate(1 - isLv23ZeroOrOne) * color4;
+                #else
+
                 float4 colVoxel = tex2D(_VoxelShadowmap, (1 - isLv23ZeroOrOne) * float4(litSpaceClipPos.xy,0,0).xy);
                 float4 col = tex2D(_Shadowmap, (1 - isLv23ZeroOrOne) * float4(litSpaceClipPos.xy,0,0).xy);
 
@@ -426,7 +470,7 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 finalCol = isLv1ZeroOrOne * colorIfOneOrZero + 
                     saturate(1 - isLv1ZeroOrOne) * isLv23ZeroOrOne * colorIfLv23OneOrZero + 
                     saturate(1 - isLv1ZeroOrOne) * saturate(1 - isLv23ZeroOrOne) * colorSM;
-
+                #endif
                 return finalCol;
 }
 
