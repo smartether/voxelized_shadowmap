@@ -330,7 +330,7 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
             var _voxelShadowMapRT = Shader.PropertyToID("_voxelShadowMapRT");
             List<Texture2D> voxelTextures = new List<Texture2D>();
             var tmpRt = RenderTexture.GetTemporary(shadowMap.width, shadowMap.height, 16, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear, 2);
-            for (int i = 0, c = Mathf.CeilToInt(farClip / VoxelSize); i < c; i++)
+            for (int i = 0, c = RootVoxelWidthSize /*Mathf.CeilToInt(farClip / VoxelSize)*/; i < c; i++)
             {
                 tmpRt.DiscardContents(true, true);
                 cmb.Clear();
