@@ -120,7 +120,7 @@ Material:
     - _RoughnessScale: 1
     - _ShadowAlpha: 0.549
     - _ShadowBalance: 0.5
-    - _ShadowBias: 99
+    - _ShadowBias: 15
     - _ShadowBias1: 0.33
     - _ShadowDensity: 0
     - _SmoothnessTextureChannel: 0
@@ -129,12 +129,12 @@ Material:
     - _UVSec: 0
     - _ZWrite: 1
     - _level1TexSize: 256
-    - _level2TexArrayDepth: 174
-    - _level4TexArrayDepth: 485
+    - _level2TexArrayDepth: 103
+    - _level4TexArrayDepth: 404
     m_Colors:
     - _Color: {r: 1, g: 1, b: 1, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
-    - _ProjSizeParams: {r: 2500, g: 0.0004, b: 5000, a: 0.0002}
-    - _VoxelParams: {r: 156.25, g: 0.0064, b: 32, a: 0.03125}
-    - _VoxelParamsLv2: {r: 78.125, g: 0.0128, b: 64, a: 0.015625}
-    - _VoxelParamsLv3: {r: 39.0625, g: 0.0256, b: 128, a: 0.0078125}
+    - _ProjSizeParams: {r: 500, g: 0.002, b: 1000, a: 0.001}
+    - _VoxelParams: {r: 31.25, g: 0.032, b: 32, a: 0.03125}
+    - _VoxelParamsLv2: {r: 15.625, g: 0.064, b: 64, a: 0.015625}
+    - _VoxelParamsLv3: {r: 7.8125, g: 0.128, b: 128, a: 0.0078125}

@@ -1,4 +1,6 @@
 #ifndef VOXELIZEDSM_INCLUDED
+// Upgrade NOTE: excluded shader from DX11, OpenGL ES 2.0 because it uses unsized arrays
+#pragma exclude_renderers d3d11 gles
 #define VOXELIZEDSM_INCLUDED
 #ifdef _DEBUG_SM_ON
 #define __DEBUG_COLOR_
@@ -39,6 +41,7 @@
 #define VOXELIZED_SM_COORDS(idx, idx1,idx2,idx3,idx4,idx5) float litDistance : TEXCOORD##idx; float depthWithBias : TEXCOORD##idx1;DECLARE_POS(idx2) DECLARE_PREDICT(idx3, 1) DECLARE_PREDICT(idx4, 2) DECLARE_PREDICT(idx5, 3)
 
 
+uint table[] = {1,2,4,8,16,32,64,128};
 // x: lv1 voxel size(litSpace) y:lv2 voxel Size
 float4 _VoxelParams;
 float4 _VoxelParamsLv2;
@@ -281,7 +284,9 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                         voxelPosLv3 = floor(litSpaceClipPos * _VoxelParamsLv3.z);
                         voxelIdLv3 = floor(litSpaceClipPos.z * _VoxelParams.z % 1 * 4);
                         voxelIdLv4 = floor(litSpaceClipPos * _VoxelParamsLv3.z % 0.5 * 2 * 8);
-                        uVoxelPosLv3 = (uint)floor(litSpaceClipPos * _VoxelParamsLv2.z);
+                        uVoxelPosLv3 = (uint)floor(litSpaceClipPos * _VoxelParamsLv3.z);
+                        uVoxelPosLv2 = (uint)floor(litSpaceClipPos * _VoxelParamsLv2.z);
+                        uVoxelPos = (uint)floor(litSpaceClipPos * _VoxelParams.z);
                     #endif
                 voxelUnionPosLv2 = floor(voxelPosLv2 % 1.999); // 2.0); //
                 voxelUnionPosLv3 = floor(voxelPosLv3 % 1.999); // 2.0); //
@@ -378,17 +383,14 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 float lv4U = lv4UPixel / 64.0;
                 float4 lv4Color = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, float3(lv4U, lv4V , lv4Depth), 0);
                 
-                uint flag = (uint)(1 << (uint)floor(lv4Pos.z));
-                uint lvC = (uint)round(lv4Color[floor(lv4Pos.x % 4)] * 255) & flag;
-                color4 = lvC == 1 ? 1 : 0;
-                // if(lvC == 1){
-                //     return fixed4(0,0,1,1);
-                // }
-                // else{
-                //     return fixed4(1,0,0,1); 
-                // }
-                // fixed4 lv4Uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, )
-                //color4 = 1;
+                //uint table1[] = {1,2,4,8,16,32,64,128};
+                uint flag = table[(uint)floor(lv4Pos.z)]; //(uint)(1u << (int)floor(lv4Pos.z)); //
+
+                // return round(lv4Color[floor(lv4Pos.x % 3.9)] * 256) / 255;
+                uint lvC = (uint)round(lv4Color[floor(lv4Pos.x % 4)] * 256) & flag;
+                color4 = lvC == 1 ? 1 : shadowAlpha;
+                
+
                 finalCol = isLv1ZeroOrOne * colorIfOneOrZero + 
                     saturate(1 - isLv1ZeroOrOne) * isLv23ZeroOrOne * colorIfLv23OneOrZero + 
                     saturate(1 - isLv1ZeroOrOne) * saturate(1 - isLv23ZeroOrOne) * color4;
