@@ -12,6 +12,7 @@ using UnityEngine.SceneManagement;
 
 public class ScreenSpaceVx : MonoBehaviour
 {
+    public VxShadowmap vxShadowmap;
     public Renderer[] objs;
     public Material litMat;
     public Material guassMat;
@@ -26,7 +27,12 @@ public class ScreenSpaceVx : MonoBehaviour
         {
             if(cam == null)
             {
+#if UNITY_EDITOR
                 cam = UnityEditor.SceneView.lastActiveSceneView.camera;
+
+#else
+                cam = Camera.main;
+#endif
             }
             return cam;
         }
@@ -40,10 +46,24 @@ public class ScreenSpaceVx : MonoBehaviour
         //var viewCamera = cam = UnityEditor.SceneView.lastActiveSceneView.camera;
         //viewCamera.SetReplacementShader(UnityEditor.AssetDatabase.LoadAssetAtPath<Shader>("Assets/Editor/ShadowmapBaker/Resources/VxRender.shader"), "");
         //viewCamera.Render();
+
+        vxShadowmap.LoadUniformData();
+        SetupViewCamera();
+    }
+
+    private void OnDestroy()
+    {
+        ClearCommandBuff();
+    }
+
+    private void OnApplicationQuit()
+    {
+        ClearCommandBuff();
     }
 
     CommandBuffer matrixCmd;
 
+#if UNITY_EDITOR
     //[UnityEditor.MenuItem("Tools/SelectViewCamera")]
     [ContextMenu("SelectViewCamera")]
     public void SelectViewCamera()
@@ -52,6 +72,13 @@ public class ScreenSpaceVx : MonoBehaviour
 
     }
 
+    [ContextMenu("LoadMatrixFromEnv")]
+    public void LoadMatrix()
+    {
+        vxShadowmap.vxShadowmapUniformData._LitViewMatrix = Shader.GetGlobalMatrix("_LitViewMatrix");
+        vxShadowmap.vxShadowmapUniformData._LitProjMatrix = Shader.GetGlobalMatrix("_LitProjMatrix");
+    }
+#endif
 
     [ContextMenu("ClearCommandBuff")]
     public void ClearCommandBuff()
@@ -115,11 +142,12 @@ public class ScreenSpaceVx : MonoBehaviour
         {
             screenTextureSize = new Vector2(Mathf.ClosestPowerOfTwo((int)screenShadowTextureSize.x), Mathf.ClosestPowerOfTwo((int)screenShadowTextureSize.y));
         }
-        var _VxShadow_BlurTex = RenderTexture.GetTemporary((int)screenTextureSize.x , (int)screenTextureSize.y, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear, 2);
-        _VxShadow_BlurTex.wrapMode = TextureWrapMode.Clamp;
-        _VxShadow_BlurTex.name = "_VxShadow_Blur";
+
+        //var _VxShadow_BlurTex = RenderTexture.GetTemporary((int)screenTextureSize.x , (int)screenTextureSize.y, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear, 2);
+        //_VxShadow_BlurTex.wrapMode = TextureWrapMode.Clamp;
+        //_VxShadow_BlurTex.name = "_VxShadow_Blur";
         CommandBuffer cmd = new CommandBuffer();
-        cmd.IssuePluginEvent(System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(new IssueCallback(SyncMatrix)), 0);
+        //cmd.IssuePluginEvent(System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(new IssueCallback(SyncMatrix)), 0);
         cmd.name = "VxShadowBlurFeature";
         // cmd.SetViewProjectionMatrices(mat1, mat2);
 #if UNITY_EDITOR && _ENABLE_RT_1

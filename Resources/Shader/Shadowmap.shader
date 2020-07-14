@@ -142,7 +142,11 @@
                     o.depth = o.vertex.z / o.vertex.w * 0.5 + 0.5; // clipPos.z / clipPos.w;
                 #endif
                 
-                o.depth = lerp(_backDepth, _frontDepth, o.depth);
+                #ifdef SHADER_API_D3D11
+                    o.depth = clamp(lerp(_backDepth, _frontDepth, o.depth),0, 1.0/*0.9999*/);
+                #else
+                    o.depth = 1 - clamp(lerp(_backDepth, _frontDepth, o.depth), 0.0 /*0.0001*/, 1);
+                #endif
                 return o;
             }
 
@@ -156,11 +160,11 @@
                 // #endif
                 // return 1 - i.depth;
                 clip(tex2D(_MainTex, TRANSFORM_TEX(i.uv, _MainTex)).a  - 0.3333);
-                #ifdef SHADER_API_D3D11
-                    return EncodeFloatRGBA(i.depth);
-                #else
-                    return EncodeFloatRGBA(1- i.depth);
-                #endif
+                // #ifdef SHADER_API_D3D11
+                return EncodeFloatRGBA(i.depth);
+                // #else
+                //     return EncodeFloatRGBA(1- i.depth);
+                // #endif
 
                 
             }

@@ -2,41 +2,148 @@
 //#define _GEN_SCALED_TEX
 #define _ENABLE_BIG_TEX
 //#define _LV3_OLD_MODE
+#define _ENABLE_CUDA
+#define _LZ4_COMPRESS_
+#define _ENABLE_STRIP_
+#define _MEMMAP_
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel.Unsafe;
 using UnityEditor;
+using UnityEditor.PackageManager;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
 
-public partial class ShadowmapBaker
+public unsafe partial class ShadowmapBaker
 {
+    const string DLL_NAME = "VoxelizedKernel.dll";
+    // 64Bit size memory allocate
+    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi, EntryPoint = "malloc")]
+    public static extern void* malloc(ulong size);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "AllocMem")]
+    public static extern void* AllocMem(ulong size);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "FreeMem")]
+    public static extern void* FreeMem(void* ptr);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GetSubArray")]
+    public static extern void* GetSubArray(void* ptr, long start, long length);
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 2048 * 2048)]
-    public struct PlaceholdStruct2048
+    // Cuda acclerate
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Init")]
+    public static extern void Init(uint  targetBufferPoolSize, uint  originBufferPoolSize, uint  targetSize, uint scaler = 2, uint threadNum = 16);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Close")]
+    public static   extern new  void Close();
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Downsample")]
+    public static extern int Downsample(void* targetTex, void* originTex, uint targetSize, uint scaler);
+
+    const string DLL_LZ4 = "liblz4.dll";
+    //LZ4 compression
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_createStream")]
+    public static unsafe extern void* LZ4_createStream();
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_freeStream")]
+    public static unsafe extern int LZ4_freeStream(void* streamPtr);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_createStreamDecode")]
+    public static unsafe extern void* LZ4_createStreamDecode();
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_freeStreamDecode")]
+    public static unsafe extern int LZ4_freeStreamDecode(void* LZ4_stream);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_compress_fast_continue")]
+    public static unsafe extern int LZ4_compress_fast_continue(void* streamPtr, byte* src, byte* dst, int srcSize, int dstCapacity, int acceleration);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_decompress_safe_continue")]
+    public static unsafe extern int LZ4_decompress_safe_continue(void* LZ4_streamDecode, byte* src, byte* dst, int srcSize, int dstCapacity);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_compress_default")]
+    public static unsafe extern int LZ4_compress_default(byte* src, byte* dst, int srcSize, int dstCapacity);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_compress_fast")]
+    public static unsafe extern int LZ4_compress_fast(byte* src, byte* dst, int srcSize, int dstCapacity, int acceleration);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_decompress_safe")]
+    public static unsafe extern int LZ4_decompress_safe(byte* src, byte* dst, int compressedSize, int dstCapacity);
+    [DllImport(DLL_LZ4, CallingConvention = CallingConvention.Cdecl, EntryPoint = "LZ4_compressBound")]
+    public static unsafe extern int LZ4_compressBound(int inputSize);
+
+    private void cancelPrecomputeVoxelDepth()
     {
-        [FieldOffset(2048 * 2048)]
-        public byte[] data;
+        
     }
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 1024 * 1024)]
-    public struct PlaceholdStruct1024
+
+    const string LitShadowMapPath = "litshadowmapSSD/";
+
+
+    // NativeArray不支持超过2G大小 并且 每个元素不可超过2MB
+    byte* mLitShadowInfoArrayLv4Nalayout = null;
+    object mLockObj = new object();
+    int mTaskProgress = 0;
+    List<Task> mPendingTask = new List<Task>();
+    List<Task> mPlTasks = new List<Task>();
+    CancellationTokenSource mCancelAllTask = new CancellationTokenSource();
+    TaskScheduler mMainTaskScheduler = null;
+
+    private void IncreaseProgress()
     {
-        [FieldOffset(1024 * 1024)]
-        public byte[] data;
+        lock (mLockObj)
+        {
+            mTaskProgress++;
+        }
     }
+    private void ResetProgress()
+    {
+        mTaskProgress = 0;
+        UnityEditor.EditorUtility.ClearProgressBar();
+    }
+    private bool WaitPendingTask(int taskTotal, bool block = false, bool cancelable = true, string info= "Calculate", string detail= "Summary Lv4 Voxel to Lv3", List<Task> pendingTask = null, int timeOut = -1)
+    {
+        pendingTask = pendingTask == null ? this.mPendingTask : pendingTask;
+        var task = block ? Task.Run(() => { 
+            if(timeOut > 0)
+                Task.WaitAll(pendingTask.ToArray(), timeOut);
+            else
+                Task.WaitAll(pendingTask.ToArray());            
+        }) : null;
+        do
+        {
+            if (cancelable)
+            {
+                System.Threading.Thread.Sleep(300);
+                if (EditorUtility.DisplayCancelableProgressBar(info, detail, (float)mTaskProgress / taskTotal))
+                {
+                    //pendingTask.ForEach((task1) =>
+                    //{
+                        
+                    //});
+                    mCancelAllTask.Cancel(false);
+                    FreeMem(mLitShadowInfoArrayLv4Nalayout);
+                    EditorUtility.ClearProgressBar();
+                    return true;
+                }
+            }
+            else
+            {
+                EditorUtility.DisplayProgressBar(info, detail, (float)mTaskProgress / taskTotal);
+            }
+        } while (block && !task.IsCompleted);
+        return false;
+    }
+
     // compute voxel on cpu 
     // compute lv3 lit or shadow info first, then summary to lv2 and rootLv1
     unsafe void precomputeVoxelDepth()
     {
-
+        renderMode = RenderMode.Shadowmap;
+        bake();
+        renderMode = RenderMode.VoxelShadowmapDiff;
+        bake();
+        RootVoxelWidthSize = RootVoxelWidthSize / 8 / 4;
+#if _MEMMAP_
+        //var slicedFilePath = UnityEditor.EditorUtility.SaveFolderPanel("memory mapfile", Application.dataPath, "");
+#endif
+        mMainTaskScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+        EditorUtility.DisplayProgressBar("Calculate", "Start alloc memory", 0.0f);
         int rootVoxelSize = RootVoxelWidthSize;
         int lv2VoxelSize = rootVoxelSize * 2;
         int lv3VoxelSize = lv2VoxelSize * 2;
@@ -67,98 +174,164 @@ public partial class ShadowmapBaker
         Texture2DArray litShadowInfoArrayLv1 = new Texture2DArray(rootVoxelSize, rootVoxelSize, rootVoxelSize, TextureFormat.Alpha8, false, true);
 
 
-        int lv4VoxelCount = 0;
-        bool isLv4VoxelOverflow = false;
-        NativeArray<byte> litShadowInfoArrayLv4Na = new NativeArray<byte>();
-        // NativeArray不支持超过2G大小 并且 每个元素不可超过2MB
-        byte* litShadowInfoArrayLv4Nalayout = null;
-        try
-        {
-            checked
-            {
-                lv4VoxelCount = lv4VoxelSize * lv4VoxelSize * lv4VoxelSize;
-            }
-            litShadowInfoArrayLv4Na = new NativeArray<byte>(lv4VoxelCount, Allocator.Temp, NativeArrayOptions.ClearMemory);
-        }
-        catch (System.OverflowException e)
-        {
-            isLv4VoxelOverflow = true;
-        }
-        if (isLv4VoxelOverflow)
-        {
-            
-            litShadowInfoArrayLv4Nalayout = (byte*)System.Runtime.InteropServices.Marshal.AllocHGlobal(lv4VoxelCount).ToPointer(); //new NativeArray<PlaceholdStruct2048>(lv4VoxelSize, Allocator.Persistent, NativeArrayOptions.ClearMemory);
-            
-        }
-        
-        var litShadowInfoArrayLv3Na = new NativeArray<byte>(lv3VoxelSize * lv3VoxelSize * lv3VoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
-        var litShadowInfoArrayLv2Na = new NativeArray<byte>(lv2VoxelSize * lv2VoxelSize * lv2VoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
-        var litShadowInfoArrayLv1Na = new NativeArray<byte>(rootVoxelSize * rootVoxelSize * rootVoxelSize, Allocator.Temp, NativeArrayOptions.ClearMemory);
+        ulong lv4VoxelSize64 = (ulong)lv4VoxelSize;
+        mLitShadowInfoArrayLv4Nalayout = (byte*)AllocMem(lv4VoxelSize64 * lv4VoxelSize64 * lv4VoxelSize64);
+        EditorUtility.DisplayProgressBar("Calculate", "Start alloc memory", 1.0f);
+
+
+        var litShadowInfoArrayLv3Na = new NativeArray<byte>(lv3VoxelSize * lv3VoxelSize * lv3VoxelSize, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+        var litShadowInfoArrayLv2Na = new NativeArray<byte>(lv2VoxelSize * lv2VoxelSize * lv2VoxelSize, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+        var litShadowInfoArrayLv1Na = new NativeArray<byte>(rootVoxelSize * rootVoxelSize * rootVoxelSize, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 
         List<Object> resourceToRelease = new List<Object>();
+        var fileInfo = new System.IO.FileInfo(slicedFilePath + "/memoryMappingStripped.data");
+        var voxelInfoMemory = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateFromFile(slicedFilePath + "/memoryMappingStripped.data", System.IO.FileMode.Open, "VoxelInfoMapFile", fileInfo.Length, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
 
-        object lockObj = new object();
-        int threadCount = 0;
-        List<Task> pendingTask = new List<Task>();
-        List<Task> plTasks = new List<Task>();
-
-        var mainTaskScheduler = TaskScheduler.FromCurrentSynchronizationContext();
         unsafe
         {
+            //Texture2D alphaTex =new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.Alpha8, false, true);
             // z-depth 
+            int width = shadowMap.width;
+            int height = shadowMap.height;
+            Init(16, 16, (uint)lv4VoxelSize, (uint)shadowMap.width / (uint)lv4VoxelSize, 16);
             for (int dVoxelIndex = 0, dVoxelMaxIndex = lv4VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
             {
-                var voxelLitShadowInfo = AssetDatabase.LoadAssetAtPath<Texture2D>(string.Format("Assets/litshadowmap/voxel_lv_{0}.asset", dVoxelIndex));
-                bool isAlpha8 = voxelLitShadowInfo.format == TextureFormat.Alpha8;
-                resourceToRelease.Add(voxelLitShadowInfo);
-                if (voxelLitShadowInfo == null)
-                {
-                    Debug.Log(string.Format("voxelLitShadowInfo {0} is not exist.", dVoxelIndex));
-                }
-                var tex = voxelLitShadowInfo;
-                var texName = tex.name;
                 byte* blockPixels = null;
-                if (isLv4VoxelOverflow)
-                    blockPixels = (byte*)litShadowInfoArrayLv4Nalayout[voxelAreaLv4 * dVoxelIndex];
-                else
-                    blockPixels = (byte*)litShadowInfoArrayLv4Na.GetSubArray(voxelAreaLv4 * dVoxelIndex, voxelAreaLv4).GetUnsafeReadOnlyPtr();// litShadowInfoArrayLv4.GetPixels(dVoxelIndex, 0);
-                var voxelLitShadowInfoColorNA = voxelLitShadowInfo.GetRawTextureData<Color32>();
-                var voxelLitShadowInfoNA = voxelLitShadowInfo.GetRawTextureData<byte>();
+                blockPixels = (byte*)mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)dVoxelIndex;
+                NativeArray<byte> voxelLitShadowInfoNA = new NativeArray<byte>(width * height, Allocator.Persistent);
+                byte* ptr = (byte*)voxelLitShadowInfoNA.GetUnsafePtr();
+
+
                 float startTime = Time.realtimeSinceStartup;
 
-                if (pendingTask.Count > 64)
+                if (mPendingTask.Count > 32)
                 {
-                    Task.WaitAll(pendingTask.ToArray());
-                    pendingTask.Clear();
+                    if (WaitPendingTask(lv4VoxelSize, true))
+                        return;
+                    mPendingTask.Clear();
+
                 }
-
-
+                //WaitPendingTask(lv4VoxelSize, false);
+                    string dataPathTmp = Application.dataPath;
                 int dVoxelIndexTmp = dVoxelIndex;
-                System.Action task = () =>
-                {
-                //litShadowInfoArrayLv4.SetPixels(blockPixels, dVoxelIndexTmp, 0);
-                // NativeArray<byte>.Copy(blockPixels, 0, litShadowInfoArrayLv4Na, litShadowInfoArrayLv4.width * litShadowInfoArrayLv4.height * dVoxelIndexTmp, blockPixels.Length);
-            };
-
-                int width = voxelLitShadowInfo.width;
-                int height = voxelLitShadowInfo.height;
                 //System.Threading.ThreadPool.UnsafeQueueUserWorkItem(
-                var plTask = new Task(() =>
+                var plTask = Task.Run(() =>
                 {
-                    System.Threading.Thread.Sleep(300);
-                    int errorIndex = 0;
+#if !_LZ4_COMPRESS_
+                    var fileStream = new System.IO.FileStream(string.Format(LitShadowMapPath + "voxel_lv_{0}.gzip", dVoxelIndexTmp), System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite);
+                    
+                    var gzipStream = new System.IO.Compression.DeflateStream(fileStream, System.IO.Compression.CompressionMode.Decompress);
+                    var writeMem = new System.IO.UnmanagedMemoryStream(ptr, 4096, width * height, System.IO.FileAccess.Write);
+
+                    var task = gzipStream.CopyToAsync(writeMem);
+                    while (!task.IsCompleted)
+                        System.Threading.Thread.Sleep(10);
+                    fileStream.Close();
+                    gzipStream.Close();
+                    writeMem.Close();
+#else
+
+
+#if !_MEMMAP_
+                    using (var fileStream1 = new System.IO.FileStream(string.Format(LitShadowMapPath + "voxel_lv_{0}.lz4", dVoxelIndexTmp), System.IO.FileMode.Open, System.IO.FileAccess.Read))
+                    {
+                        int textureAreaSize = 4096 * 4096;
+
+                        uint compressedSize = 0;
+
+                        ((byte*)&compressedSize)[0] = (byte)fileStream1.ReadByte();
+                        ((byte*)&compressedSize)[1] = (byte)fileStream1.ReadByte();
+                        ((byte*)&compressedSize)[2] = (byte)fileStream1.ReadByte();
+                        ((byte*)&compressedSize)[3] = (byte)fileStream1.ReadByte();
+                        //fileStream1.Seek(4, System.IO.SeekOrigin.Begin);
+
+                        var bufferPtr = (byte*)AllocMem((ulong)compressedSize);
+                        var bufferUnmanged = new System.IO.UnmanagedMemoryStream((byte*)bufferPtr, compressedSize, compressedSize, System.IO.FileAccess.Write);
+
+                        try
+                        {
+                            fileStream1.CopyTo(bufferUnmanged, (int)compressedSize);
+                            //LZ4_decompress_safe_continue(lz4Stream, buffer, ptr, 4096 * 4096, 4096 * 4096);
+                            int decodeSize = LZ4_decompress_safe((byte*)bufferPtr, ptr, (int)compressedSize, textureAreaSize);
+                            //Debug.Log(decodeSize);
+                        }
+                        finally
+                        {
+                            FreeMem(bufferPtr);
+                            bufferUnmanged.Dispose();
+                        }
+                    }
+#else
+                    
+                    
+                    //using(var voxelInfoMemory = System.IO.MemoryMappedFiles.MemoryMappedFile.OpenExisting("strippedMemMap", System.IO.MemoryMappedFiles.MemoryMappedFileRights.ReadWrite))
+                    
+                    {
+                        int textureAreaSize = width * height;
+                        uint contentOffset = 0;
+                        uint compressedSize = 0;
+                        using (var readHead = voxelInfoMemory.CreateViewStream(dVoxelIndexTmp * 8, 8, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read))
+                        {
+                            ((byte*)&contentOffset)[0] = (byte)readHead.ReadByte();
+                            ((byte*)&contentOffset)[1] = (byte)readHead.ReadByte();
+                            ((byte*)&contentOffset)[2] = (byte)readHead.ReadByte();
+                            ((byte*)&contentOffset)[3] = (byte)readHead.ReadByte();
+                            ((byte*)&compressedSize)[0] = (byte)readHead.ReadByte();
+                            ((byte*)&compressedSize)[1] = (byte)readHead.ReadByte();
+                            ((byte*)&compressedSize)[2] = (byte)readHead.ReadByte();
+                            ((byte*)&compressedSize)[3] = (byte)readHead.ReadByte();
+                        }
+                        using(var readContent = voxelInfoMemory.CreateViewStream(contentOffset, compressedSize, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read))
+                        {
+                            var bufferPtr = (byte*)AllocMem((ulong)compressedSize);
+                            var bufferUnmanged = new System.IO.UnmanagedMemoryStream((byte*)bufferPtr, compressedSize, compressedSize, System.IO.FileAccess.Write);
+
+                            try
+                            {
+                                readContent.CopyTo(bufferUnmanged, (int)compressedSize);
+                                //LZ4_decompress_safe_continue(lz4Stream, buffer, ptr, 4096 * 4096, 4096 * 4096);
+                                int decodeSize = LZ4_decompress_safe((byte*)bufferPtr, ptr, (int)compressedSize, textureAreaSize);
+                                //Debug.Log(decodeSize);
+
+                                if (dVoxelIndexTmp % 256 == 0)
+                                {
+                                    System.IO.File.WriteAllBytes(dataPathTmp + "/tex_" + dVoxelIndexTmp + ".bytes", voxelLitShadowInfoNA.ToArray());    
+                                }
+                            }
+                            finally
+                            {
+                                FreeMem(bufferPtr);
+                                bufferUnmanged.Dispose();
+                            }
+                        }
+                    }
+#endif
+#endif
+
 
                     Color32* voxelLitShadowInfoPtr = null;
-                    byte* alpha8 = null;
-                    if (isAlpha8)
-                        alpha8 = (byte*)voxelLitShadowInfoNA.GetUnsafePtr<byte>();
-                    else
-                        voxelLitShadowInfoPtr = (Color32*)voxelLitShadowInfoColorNA.GetUnsafePtr<Color32>();
+                    //byte* alpha8 = null;
+#if _ENABLE_CUDA
+                    try
+                    {
+                        //alpha8 = (byte*)voxelLitShadowInfoNA.GetUnsafePtr<byte>();
 
+                        int errorCode = Downsample(blockPixels, ptr, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize));
+                        if (errorCode != 0)
+                            Debug.Log(errorCode);
+                    }
+                    finally
+                    {
+                        voxelLitShadowInfoNA.Dispose();
+                    }
+#else
+                    long uvBlockIdxMax = System.Convert.ToInt64(lv4VoxelSize);
                     for (int vBlockIndex = 0, vBlockIdxMax = lv4VoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
                     {
+                        long vBlockIndexL = System.Convert.ToInt64(vBlockIndex);
                         for (int uBlockIndex = 0, uBlockIdxMax = lv4VoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
                         {
+                            long uBlockIndexL = System.Convert.ToInt64(uBlockIndex);
                             int uPixelBase = lv4PixelPerVoxel * uBlockIndex;
                             int vPixelBase = lv4PixelPerVoxel * vBlockIndex;
 
@@ -169,10 +342,10 @@ public partial class ShadowmapBaker
                                 for (int uPixelSub = 0, uPixelMax = lv4PixelPerVoxel; uPixelSub < lv4PixelPerVoxel; uPixelSub++)
                                 {
                                     int vPixel = vPixelBase + vPixelSub;
-                                //vPixel = vBlockIndex * uBlockIdxMax * lv3PixelPerVoxel * lv3PixelPerVoxel;
-                                int uPixel = uPixelBase + uPixelSub;
+                                    //vPixel = vBlockIndex * uBlockIdxMax * lv3PixelPerVoxel * lv3PixelPerVoxel;
+                                    int uPixel = uPixelBase + uPixelSub;
 
-                                    var pixel = isAlpha8 ? alpha8[vPixel * width + uPixel] / 255.0f : voxelLitShadowInfoPtr[vPixel * width + uPixel].r;
+                                    var pixel = ptr[vPixel * width + uPixel] / 255.0f;
                                     errorIndex = vPixel * width + uPixel;
                                     var isWhite = Mathf.Abs(pixel - 1) < 0.1f;
                                     var isBlack = Mathf.Abs(pixel - 0) < 0.1f;
@@ -186,68 +359,44 @@ public partial class ShadowmapBaker
                             var blockResult = (isBlockLit ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
                             if (isBlockIntersection)
                             {
-                                blockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = 128;
+                                blockPixels[vBlockIndexL * uvBlockIdxMax + uBlockIndexL] = 128;
                             }
-                            blockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = (byte)Mathf.RoundToInt((blockResult * 255));// Color.white * blockResult;
+                            if ((blockPixels + vBlockIndexL * uvBlockIdxMax + uBlockIndexL) == null)
+                            {
+                                Debug.Log(vBlockIndexL + " " + uvBlockIdxMax + " " + uBlockIndexL);
+                            }
+                            blockPixels[vBlockIndexL * uvBlockIdxMax + uBlockIndexL] = (byte)Mathf.RoundToInt((blockResult * 255));// Color.white * blockResult;
                         }
                     }
+#endif
+                    IncreaseProgress();
+                }, mCancelAllTask.Token);
 
-                });
-
-                plTasks.Add(plTask);
-
-
-
-                if (plTasks.Count > 8)
-                {
-                    plTasks.ForEach((t) =>
-                    {
-                        t.Start();
-                        pendingTask.Add(t);
-                    });
-                    plTasks.Clear();
-                }
-
-                if (resourceToRelease.Count > 8)
-                {
-                    resourceToRelease.ForEach((res) => Resources.UnloadAsset(res));
-                    Resources.UnloadUnusedAssets();
-                    System.GC.Collect();
-                }
-                resourceToRelease.Clear();
+                mPendingTask.Add(plTask);
 
             }
 
         }
-        if (plTasks.Count > 0)
+        if (mPendingTask.Count > 0)
         {
-            plTasks.ForEach((t) =>
+            if(WaitPendingTask(lv4VoxelSize, true))
             {
-                t.Start();
-                pendingTask.Add(t);
-            });
-            plTasks.Clear();
+                return;
+            }
+ 
+            mPendingTask.Clear();
         }
-        if (pendingTask.Count > 0)
-        {
-            Task.WaitAll(pendingTask.ToArray());
-            pendingTask.Clear();
-        }
+        Close();
+        ResetProgress();
+        voxelInfoMemory.Dispose();
 
-
-       // for (int depth = 0, maxDepth = litShadowInfoArrayLv4.depth; depth < maxDepth; depth++) {
-        //    var subArray = litShadowInfoArrayLv4Na.GetSubArray(depth * voxelAreaLv4, voxelAreaLv4);
-            //litShadowInfoArrayLv4.SetPixelData<byte>(subArray, 0, depth);
-       // }
-       // litShadowInfoArrayLv4.Apply(false, false);
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
+        
 
-        if(isLv4VoxelOverflow)
-            DownSample(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (byte*)litShadowInfoArrayLv4Nalayout, 8);
-        else
-            DownSample(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (byte*)litShadowInfoArrayLv4Na.GetUnsafeReadOnlyPtr(), 8);
+        
+        DownSample(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (byte*)mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize / lv3VoxelSize);
         for (int depth = 0, maxDepth = litShadowInfoArrayLv3.depth; depth < maxDepth; depth++)
         {
             var subArray = litShadowInfoArrayLv3Na.GetSubArray(depth * voxelAreaLv3, voxelAreaLv3);
@@ -256,6 +405,7 @@ public partial class ShadowmapBaker
         litShadowInfoArrayLv3.Apply(false, false);
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
+
 
         DownSample(lv2VoxelSize, lv3VoxelSize, (byte*)litShadowInfoArrayLv2Na.GetUnsafePtr(), (byte*)litShadowInfoArrayLv3Na.GetUnsafeReadOnlyPtr());
         for (int depth = 0, maxDepth = litShadowInfoArrayLv2.depth; depth < maxDepth; depth++)
@@ -268,6 +418,7 @@ public partial class ShadowmapBaker
         System.GC.Collect();
 
         DownSample(rootVoxelSize, lv2VoxelSize, (byte*)litShadowInfoArrayLv1Na.GetUnsafePtr(), (byte*)litShadowInfoArrayLv2Na.GetUnsafeReadOnlyPtr());
+        //DownSample(rootVoxelSize, lv2VoxelSize, litShadowInfoArrayLv1, litShadowInfoArrayLv2);
         for (int depth = 0, maxDepth = litShadowInfoArrayLv1.depth; depth < maxDepth; depth++)
         {
             var subArray = litShadowInfoArrayLv1Na.GetSubArray(depth * voxelAreaLv1, voxelAreaLv1);
@@ -277,9 +428,36 @@ public partial class ShadowmapBaker
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
+        /*
+        int albumSie = 64;
+        NativeArray<byte> lv4Frame = new NativeArray<byte>(albumSie * albumSie, Allocator.Temp);
+        for (int frameIdx = 0; frameIdx < albumSie; frameIdx++)
+        {
+            using (var memcpyFrom = new System.IO.UnmanagedMemoryStream((byte*)litShadowInfoArrayLv1Na.GetUnsafePtr() + (long)albumSie * (long)albumSie * frameIdx, albumSie * albumSie, albumSie * albumSie * 2, System.IO.FileAccess.Read))
+            using (var memcpy = new System.IO.UnmanagedMemoryStream((byte*)lv4Frame.GetUnsafePtr(), albumSie * albumSie, albumSie * albumSie * 2, System.IO.FileAccess.Write))
+            {
+                memcpyFrom.CopyTo(memcpy, albumSie * albumSie);
+                //using (var fs = new System.IO.FileStream("lv4Frame.data", System.IO.FileMode.CreateNew, System.IO.FileAccess.Write))
+                //{
+                //    memcpyFrom.Seek(0, System.IO.SeekOrigin.Begin);
+                //    memcpyFrom.CopyTo(fs);
+                //}
+                Texture2D texDebug = new Texture2D(albumSie, albumSie, TextureFormat.Alpha8, false, true);
+                texDebug.SetPixelData<byte>(lv4Frame, 0);
+                texDebug.Apply();
+                AssetDatabase.CreateAsset(texDebug, string.Format("Assets/lv2Frame/lv4Frame{0}.asset", frameIdx));
+            }
+
+        }
+        FreeMem(litShadowInfoArrayLv4Nalayout);
+        return;
+        */
+        ResetProgress();
         //setTopVoxelLit(litShadowInfoArrayLv3);
-        //if(bSetTopIntersectedVoxelLit)
-        //    setTopVoxelLit(litShadowInfoArrayLv4);
+        if (bSetTopIntersectedVoxelLit)
+        {
+            setTopVoxelLit(mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize, lv4VoxelSize, lv4VoxelSize);
+        }
         //setTopVoxelLit(litShadowInfoArrayRoot);
 
         if (bExportLvLitShadowInfoTexArray4Dbg)
@@ -287,12 +465,11 @@ public partial class ShadowmapBaker
             AssetDatabase.CreateAsset(litShadowInfoArrayLv1, "Assets/lightInfoArrayLv1.asset");
             AssetDatabase.CreateAsset(litShadowInfoArrayLv2, "Assets/lightInfoArrayLv2.asset");
             AssetDatabase.CreateAsset(litShadowInfoArrayLv3, "Assets/lightInfoArrayLv3.asset");
-            //AssetDatabase.CreateAsset(litShadowInfoArrayLv4, "Assets/lightInfoArrayLv4.asset");
         }
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
-
+        ResetProgress();
         // calculate intersected lv1 voxel count, to construct a lv2 info map
         int[] lv1IntesectedPerlayer = new int[rootVoxelSize];
         int lv1IntersectedCount = SumInfo(rootVoxelSize, litShadowInfoArrayLv1Na, DownSampleOption.SumTargetIntersectedCount, lv1IntesectedPerlayer);
@@ -317,11 +494,8 @@ public partial class ShadowmapBaker
         //Debug.Log("$$ lv1IntersectedCount1:" + lv1IntersectedCount1);
         int lv23TextureArraySize = Mathf.CeilToInt(lv1IntersectedCount / 32 + (lv1IntersectedCount % 32 > 0 ? 1 : 0)); //Mathf.NextPowerOfTwo
         Debug.Log("$$ lv23TextureArraySize:" + lv23TextureArraySize);
-        // 2D mode
-        int lv4TextureSize = Mathf.CeilToInt(Mathf.NextPowerOfTwo((int)Mathf.Sqrt(lv3IntersectedCount * 16)));  // 16 pixel per lv3 intersection
         // Texture2DArray mode
-        int lv4TextureArraySize = Mathf.CeilToInt(lv3IntersectedCount / 64 + (lv1IntersectedCount % 64 > 0 ? 1 : 0));
-        Debug.Log("$$ lv4TextureSize:" + lv4TextureSize);
+        int lv4TextureArraySize = Mathf.CeilToInt(lv3IntersectedCount / 64 + (lv3IntersectedCount % 64 > 0 ? 1 : 0));
         Debug.Log("$$ lv4TextureArraySize:" + lv4TextureArraySize);
 
         lv1IntersectedCount = Mathf.IsPowerOfTwo(lv1IntersectedCount) ? lv1IntersectedCount : Mathf.NextPowerOfTwo(lv1IntersectedCount);
@@ -341,11 +515,11 @@ public partial class ShadowmapBaker
 #if !_ENABLE_BIG_TEX
         Texture2D litShadowInfoMap = new Texture2D(32, lv1IntersectedCount, TextureFormat.RGBA32, false, true);
 #endif
-        Texture2DArray litShadowInfoMapArray = new Texture2DArray(32, 32, lv23TextureArraySize, TextureFormat.RGBA32, false, true);
+        //Texture2DArray litShadowInfoMapArray = new Texture2DArray(32, 32, lv23TextureArraySize, TextureFormat.RGBA32, false, true);
 #if !_ENABLE_BIG_TEX
         Texture2D litShadowInfoMapLv3 = new Texture2D(32, lv1IntersectedCount, TextureFormat.RGBA32, false, true);
 #endif
-        Texture2DArray litShadowInfoMapArrayLv3 = new Texture2DArray(32, 32, lv23TextureArraySize, TextureFormat.RGBA32, false, true);
+
         NativeArray<Color32> litShadowInfoMapArrayLv3Na = new NativeArray<Color32>(32 * 32 * lv23TextureArraySize, Allocator.Temp);
         List<NativeArray<Color32>> litShadowInfoMapArrayLv3NaLstTotal = new List<NativeArray<Color32>>(lv23TextureArraySize);
         for (int i = 0; i < lv23TextureArraySize; i++)
@@ -356,7 +530,6 @@ public partial class ShadowmapBaker
         var indexPixelsNoTexArrayPixels = litShadowInfoIndexMapNoTextureArray.GetPixels(0);
 
         // init after get a accurate size
-        Texture2DArray litShadowInfoMapArrayLv4 = new Texture2DArray(64, 64, lv4TextureArraySize, TextureFormat.RGBA32, false, true);
         NativeArray<Color32> litShadowInfoMapArrayLv4Na = new NativeArray<Color32>(64 * 64 * lv4TextureArraySize, Allocator.Temp);
         List<NativeArray<Color32>> litShadowInfoMapArrayLv4NaLstTotal = new List<NativeArray<Color32>>(lv4TextureArraySize);
         for(int i = 0; i < lv4TextureArraySize; i++) {
@@ -365,10 +538,7 @@ public partial class ShadowmapBaker
         List<System.IntPtr> litShadowInfoArrayLv4NaLstTotal = new List<System.IntPtr>();
         for (int i = 0; i < lv4VoxelSize; i++)
         {
-            if (isLv4VoxelOverflow)
-                litShadowInfoArrayLv4NaLstTotal.Add(new System.IntPtr(litShadowInfoArrayLv4Nalayout[voxelAreaLv4 * i]));
-            else
-                litShadowInfoArrayLv4NaLstTotal.Add(new System.IntPtr(litShadowInfoArrayLv4Na.GetSubArray(voxelAreaLv4 * i, voxelAreaLv4).GetUnsafeReadOnlyPtr()));
+            litShadowInfoArrayLv4NaLstTotal.Add(new System.IntPtr(mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)i));
         }
         MultiCoreMemSetBlack(indexPixels);
         litShadowInfoIndexMap.SetPixels(indexPixels);
@@ -376,18 +546,15 @@ public partial class ShadowmapBaker
         MultiCoreMemSetBlack(indexPixelsNoTexArrayPixels);
         litShadowInfoIndexMapNoTextureArray.SetPixels(indexPixelsNoTexArrayPixels);
 
-        for (int texArrayDepth = 0, maxDepth = litShadowInfoMapArray.depth; texArrayDepth < maxDepth; texArrayDepth++)
-        {
-            var pixels1 = litShadowInfoMapArray.GetPixels(texArrayDepth, 0);
-            MultiCoreMemSetBlack(pixels1);
-            litShadowInfoMapArray.SetPixels(pixels1, texArrayDepth);
-            var pixels2 = litShadowInfoMapArrayLv3.GetPixels(texArrayDepth, 0);
-            MultiCoreMemSetBlack(pixels2);
-            litShadowInfoMapArrayLv3.SetPixels(pixels2, texArrayDepth);
-        }
+        //for (int texArrayDepth = 0, maxDepth = litShadowInfoMapArray.depth; texArrayDepth < maxDepth; texArrayDepth++)
+        //{
+        //    var pixels1 = litShadowInfoMapArray.GetPixels(texArrayDepth, 0);
+        //    MultiCoreMemSetBlack(pixels1);
+        //    litShadowInfoMapArray.SetPixels(pixels1, texArrayDepth);
 
-        litShadowInfoMapArray.Apply();
-        litShadowInfoMapArrayLv3.Apply(false, false);
+        //}
+
+        //litShadowInfoMapArray.Apply();
 
         // bake lit shadow info to texture
         unsafe
@@ -534,8 +701,6 @@ public partial class ShadowmapBaker
                                                         int lv4ShadowedCount = 0;
                                                         for (int axeId = 0, c = 4; axeId < c; axeId++)
                                                         {
-                                                            colorLine[0] = Color.black;
-                                                            colorLine[1] = Color.black;
                                                             if (Mathf.Abs(lv3Infos[axeId] - 0.5f) < 0.1)
                                                             {
                                                                 litShadowInfoArrayLstLv4.Clear();
@@ -545,6 +710,8 @@ public partial class ShadowmapBaker
                                                                 }
                                                                 for (int vPixelIndexLv4 = 0, vPixelMaxLv4 = 8; vPixelIndexLv4 < vPixelMaxLv4; vPixelIndexLv4++)
                                                                 {
+                                                                    colorLine[0] = new Color32(0,0,0,0);
+                                                                    colorLine[1] = new Color32(0,0,0,0);
                                                                     for (int uPixelIndexLv4 = 0, uPixelMaxLv4 = 8; uPixelIndexLv4 < uPixelMaxLv4; uPixelIndexLv4++)
                                                                     {
                                                                         
@@ -561,7 +728,9 @@ public partial class ShadowmapBaker
                                                                                 lv4ShadowedCount++;
                                                                             }
                                                                             bool isIntersected = !isLit && !isShadow;
-                                                                            isLit = isLit || isIntersected;
+                                                                            //isLit = isLit || isIntersected;
+                                                                            isLit = isLit && !isIntersected;
+                                                                            isShadow = isIntersected;
                                                                             //channel |= (byte)((isLit ? 1u : 0u) << dPixelIndexLv4);
                                                                             var color = colorLine[uPixelIndexLv4 / 4];
                                                                             color[uPixelIndexLv4 % 4] |= (byte)((isLit ? 1u : 0u) << dPixelIndexLv4);
@@ -571,25 +740,25 @@ public partial class ShadowmapBaker
                                                                             //litShadowInfoMapArrayLv4NaPtr[]
 
                                                                         }
-                                                                        int V64x64 = queryIdxLv4Tmp % 64;
-                                                                        int u64x64 = 16 * axeId + (vPixelIndexLv4 * 8 + uPixelIndexLv4) / 4;
-                                                                        colorBlock64x64[V64x64 * 64 + u64x64] = colorLine[uPixelIndexLv4 / 4];
                                                                     }
+
+                                                                    int V64x64 = queryIdxLv4Tmp % 64;
+                                                                    int u64x64 = 16 * axeId + vPixelIndexLv4 * 2;
+                                                                    colorBlock64x64[V64x64 * 64 + u64x64] = colorLine[0];
+                                                                    colorBlock64x64[V64x64 * 64 + u64x64 + 1] = colorLine[1];
                                                                 }
 
                                                             }
                                                         }
 
                                                         //int lv4VPixel = queryIdxLv4Tmp % 64;
-                                                        float fLv4v = (float)(queryIdxLv4Tmp % 64) / 64.0f + 0.01f;
-                                                        int lv4Depth = queryIdxLv4Tmp / 64;
+                                                        float fLv4v = (float)(queryIdxLv4Tmp % 64) / 63.0f;
+                                                        //int lv4Depth = queryIdxLv4Tmp / 64;
                                                         float fLv4Depth = (float)(queryIdxLv4Tmp / 64) / (float)(lv4TextureArraySize - 1);
                                                         Vector2 lv4vEncoded = EncodeFloatRG(fLv4v);
                                                         Vector2 lv4DepthEncoded = EncodeFloatRG(fLv4Depth);
-                                                        colorBlock32x32[queryIdxLv1Tmp % 32 * 32 + pixelIdxLv4].r = (byte)(lv4vEncoded.x * 255);// new Color(lv4vEncoded.x, lv4vEncoded.y, lv4DepthEncoded.x, lv4DepthEncoded.y);
-                                                        colorBlock32x32[queryIdxLv1Tmp % 32 * 32 + pixelIdxLv4].g = (byte)(lv4vEncoded.y * 255);
-                                                        colorBlock32x32[queryIdxLv1Tmp % 32 * 32 + pixelIdxLv4].b = (byte)(lv4DepthEncoded.x * 255);
-                                                        colorBlock32x32[queryIdxLv1Tmp % 32 * 32 + pixelIdxLv4].a = (byte)(lv4DepthEncoded.y * 255);
+                                                        Color lv4UV = new Color(fLv4v, 0, lv4DepthEncoded.x, lv4DepthEncoded.y);
+                                                        colorBlock32x32[queryIdxLv1Tmp % 32 * 32 + pixelIdxLv4] = lv4UV;
 
                                                         queryIdxLv4Tmp++;
                                                         if (texDepthLv4Tmp != Mathf.Min(lv4TextureArraySize - 1, queryIdxLv4Tmp / 64))
@@ -613,7 +782,7 @@ public partial class ShadowmapBaker
                                     }
                                 }
 
-                                float texV = (queryIdxLv1Tmp % 32) / 32.0f + 0.01f;  //(queryIdx % (lv1IntersectedCount * 0.5f))  / ((float)lv1IntersectedCount); //queryIdx / (float)lv1IntersectedCount;  //
+                                float texV = (queryIdxLv1Tmp % 32) / 31.0f;// 32.0f + 0.01f;  //(queryIdx % (lv1IntersectedCount * 0.5f))  / ((float)lv1IntersectedCount); //queryIdx / (float)lv1IntersectedCount;  //
                                 Vector4 v = EncodeFloatRG(texV);
 
                                 float arrayIndex = (queryIdxLv1Tmp / 32) / (float)(lv23TextureArraySize - 1);
@@ -658,28 +827,231 @@ public partial class ShadowmapBaker
                         }   // End for uDir
                     }   // End for vDir
 
-                });// End Task
+                    IncreaseProgress();
+                }, mCancelAllTask.Token);// End Task
 
-                pendingTask.Add(taskToGenLitShadowTex);
+                mPendingTask.Add(taskToGenLitShadowTex);
 
 
-                if (pendingTask.Count > 8)
+                if (mPendingTask.Count > 8)
                 {
-                    Task.WaitAll(pendingTask.ToArray());
-                    pendingTask.Clear();
+                    Task.WaitAll(mPendingTask.ToArray());
+                    if (WaitPendingTask(rootVoxelSize, true, true, "Calculating", "Generating VoxelInfo Texture"))
+                        return;
+                    mPendingTask.Clear();
+
+                    WaitPendingTask(rootVoxelSize, false, true, "Calculating", "Generating VoxelInfo Texture");
+                    Resources.UnloadUnusedAssets();
+                    System.GC.Collect();
                 }
-                Resources.UnloadUnusedAssets();
-                System.GC.Collect();
+                
                 //AssetDatabase.DeleteAsset("Assets/runtimeLitShadowInfo.asset");
                 //AssetDatabase.CreateAsset(litShadowInfoMap, "Assets/runtimeLitShadowInfo.asset");
             }
         }
 
-        Task.WaitAll(pendingTask.ToArray());
-        pendingTask.Clear();
+        if (WaitPendingTask(rootVoxelSize, true, true, "Calculating", "Generating VoxelInfo Texture"))
+            return;
+        ResetProgress();
+        mPendingTask.Clear();
 
-        var savePathAsset = EditorUtility.SaveFolderPanel("保存路径", Application.dataPath, "");
-        var parentPath = FileUtil.GetProjectRelativePath(savePathAsset);
+
+#if _ENABLE_STRIP_
+        // summary lv4 voxel info
+
+        //List<System.IntPtr> texLines16 = new List<IntPtr>(16);
+        List<System.IntPtr> texLines64 = new List<IntPtr>(64);
+        for(int lv4InfoMapIdx = 0, lv4InfoMapMax = litShadowInfoMapArrayLv4NaLstTotal.Count;lv4InfoMapIdx < lv4InfoMapMax; lv4InfoMapIdx++)
+        {
+            var lv4InfoSubMap = litShadowInfoMapArrayLv4NaLstTotal[lv4InfoMapIdx];
+            for (int curLineIdx = 0, curLineMax = 64; curLineIdx < curLineMax; curLineIdx++)
+            {
+                var curLine = (UInt32*)lv4InfoSubMap.GetUnsafePtr() + 64 * curLineIdx;
+                bool isExist = false;
+                int matchedLineIdx = 0;
+                for (int lineIdx = 0, lineMax = texLines64.Count; lineIdx < lineMax; lineIdx++)
+                {
+                    var line = (UInt32*)texLines64[lineIdx].ToPointer();
+                    UInt32 sum = 0;
+                    for (int pixelIdx = 0, pixelMax = 64; pixelIdx < pixelMax; pixelIdx++)
+                    {
+                        sum += (line[pixelIdx] == curLine[pixelIdx]) ? 1u : 0u;
+                    }
+                    isExist = sum == 64;
+                    if (isExist)
+                    {
+                        matchedLineIdx = lineIdx;
+                        break;
+                    }
+                }
+                if (!isExist)
+                {
+                    byte* dicInfo = (byte*)AllocMem((ulong)(4 * 64));
+                    using (var read = new System.IO.UnmanagedMemoryStream((byte*)curLine, 4 * 64))
+                    {
+                        using(var write = new System.IO.UnmanagedMemoryStream((byte*)dicInfo, 4 * 64, 4 * 64, System.IO.FileAccess.Write))
+                        {
+                            read.CopyTo(write);
+                        }
+                    }
+                    texLines64.Add(new IntPtr(dicInfo));
+                    matchedLineIdx = texLines64.Count - 1;
+                }
+                //redirect uv
+                curLine[0] = (uint)matchedLineIdx / 64;
+                curLine[1] = (uint)matchedLineIdx % 64;
+            }
+        }
+
+        Debug.Log("$$$ total uniqal line :" + texLines64.Count);
+        //strip redundancy info & redirect uv
+        int lv4TextureArraySizeFinal = Mathf.CeilToInt(Mathf.Min(2048, texLines64.Count / 64 + (texLines64.Count % 64 > 0 ? 1 : 0)));
+        Debug.Log("$$$ lv4TextureArraySizeFinal: " + lv4TextureArraySizeFinal);
+        Texture2DArray litShadowInfoMapArrayLv4 = new Texture2DArray(64, 64, lv4TextureArraySizeFinal, TextureFormat.RGBA32, false, true);
+        var litShadowInfoMapArrayLv4NaFinal = new NativeArray<Color32>(64 * 64 * lv4TextureArraySizeFinal, Allocator.Temp);
+        for(int copySubArrayIdx=0,copySubArrayMax=texLines64.Count;copySubArrayIdx < copySubArrayMax; copySubArrayIdx++)
+        {
+            using(var copyOpt = new System.IO.UnmanagedMemoryStream((byte*)texLines64[copySubArrayIdx].ToPointer(), 64 * 4, 64 * 4, System.IO.FileAccess.Read))
+            {
+                using(var copyTo = new System.IO.UnmanagedMemoryStream((byte*)litShadowInfoMapArrayLv4NaFinal.GetUnsafePtr() + 64 * 4 * copySubArrayIdx, 64 * 4, 64 * 4, System.IO.FileAccess.Write))
+                {
+                    copyOpt.CopyTo(copyTo);
+                }
+            }
+        }
+
+        for(int lv3InfoMapIdx=0,lv3InfoMapMax= litShadowInfoMapArrayLv3NaLstTotal.Count; lv3InfoMapIdx < lv3InfoMapMax; lv3InfoMapIdx++)
+        {
+            var lv3Info = (Color32*)litShadowInfoMapArrayLv3NaLstTotal[lv3InfoMapIdx].GetUnsafePtr();
+            for(int subIdx = 0, subIdxMax = 32; subIdx < subIdxMax; subIdx++)
+            {
+                var uvInfo = lv3Info + subIdx * 32 + 16;
+                for(int uvIdx=0,uvIdxMax=16;uvIdx< uvIdxMax; uvIdx++)
+                {
+                    Color uv = uvInfo[uvIdx];
+                    float v = uv.r;
+                    float depth = DecodeFloatRG(new Vector2(uv.b, uv.a));
+                    int nV = Mathf.RoundToInt(v * 63);
+                    int nDepth = Mathf.RoundToInt(depth * (float)(lv4TextureArraySize - 1));
+                    uint* line = (uint*)litShadowInfoMapArrayLv4NaLstTotal[nDepth].GetUnsafePtr() + nV * 64;
+                    uint nNewDepth = (uint)line[0];
+                    uint nNewV = (uint)line[1];
+                    float fNewDepth = nNewDepth / (float)(lv4TextureArraySizeFinal - 1);
+                    float fNewV = (float)nNewV / 63.0f;
+                    Vector2 encodedDepth = EncodeFloatRG(fNewDepth);
+                    uvInfo[uvIdx] = new Color(fNewV, 0, encodedDepth.x, encodedDepth.y);
+                }
+            }
+        }
+
+        texLines64.ForEach((texLine) =>
+        {
+            FreeMem(texLine.ToPointer());
+        });
+
+        
+        // strip lv2-3
+        List<System.IntPtr> texLines32 = new List<IntPtr>(32);
+        for (int lv3Idx = 0, lv3IdxMax = lv23TextureArraySize; lv3Idx < lv3IdxMax; lv3Idx++)
+        {
+            var lv3InfoSubMap = (uint*)litShadowInfoMapArrayLv3NaLstTotal[lv3Idx].GetUnsafePtr();
+            for (int curLineIdx = 0, curLineMax = 32; curLineIdx < curLineMax; curLineIdx++)
+            {
+                var curLine = lv3InfoSubMap + 32 * curLineIdx;
+                bool isExist = false;
+                int matchedLineIdx = 0;
+                for (int lineIdx = 0, lineMax = texLines32.Count; lineIdx < lineMax; lineIdx++)
+                {
+                    var line = (UInt32*)texLines32[lineIdx].ToPointer();
+                    UInt32 sum = 0;
+                    for (int pixelIdx = 0, pixelMax = 32; pixelIdx < pixelMax; pixelIdx++)
+                    {
+                        sum += (line[pixelIdx] == curLine[pixelIdx]) ? 1u : 0u;
+                    }
+                    isExist = sum == 32;
+                    if (isExist)
+                    {
+                        matchedLineIdx = lineIdx;
+                        break;
+                    }
+                }
+                if (!isExist)
+                {
+                    byte* dicInfo = (byte*)AllocMem((ulong)(4 * 32));
+                    using (var read = new System.IO.UnmanagedMemoryStream((byte*)curLine, 4 * 32))
+                    {
+                        using (var write = new System.IO.UnmanagedMemoryStream((byte*)dicInfo, 4 * 32, 4 * 32, System.IO.FileAccess.Write))
+                        {
+                            read.CopyTo(write);
+                        }
+                    }
+                    texLines32.Add(new IntPtr(dicInfo));
+                    matchedLineIdx = texLines32.Count - 1;
+                }
+                //redirect uv
+                curLine[0] = (uint)matchedLineIdx / 32;
+                curLine[1] = (uint)matchedLineIdx % 32;
+            }
+        }
+
+        Debug.Log("$$$ lv23 stripped redundancy : " + texLines32.Count);
+        //strip redundancy info & redirect uv
+        int lv3TextureArraySizeFinal = Mathf.CeilToInt(Mathf.Min(2048, texLines32.Count / 32 + (texLines32.Count % 32 > 0 ? 1 : 0)));
+        Debug.Log("$$$ lv3TextureArraySizeFinal: " + lv3TextureArraySizeFinal);
+        var litShadowInfoMapArraylv3NaFinal = new NativeArray<Color32>(32 * 32 * lv3TextureArraySizeFinal, Allocator.Temp);
+        for (int copySubArrayIdx = 0, copySubArrayMax = texLines32.Count; copySubArrayIdx < copySubArrayMax; copySubArrayIdx++)
+        {
+            using (var copyOpt = new System.IO.UnmanagedMemoryStream((byte*)texLines32[copySubArrayIdx].ToPointer(), 32 * 4, 32 * 4, System.IO.FileAccess.Read))
+            {
+                using (var copyTo = new System.IO.UnmanagedMemoryStream((byte*)litShadowInfoMapArraylv3NaFinal.GetUnsafePtr() + 32 * 4 * copySubArrayIdx, 32 * 4, 32 * 4, System.IO.FileAccess.Write))
+                {
+                    copyOpt.CopyTo(copyTo);
+                }
+            }
+        }
+
+
+        var lv1LitShadowInfoIndexMapPtr = (Color32*)litShadowInfoIndexMap.GetRawTextureData<Color32>().GetUnsafePtr();
+        for (int lv1InfoMapIdx = 0, lv1InfoMapMax = litShadowInfoIndexMapSize * litShadowInfoIndexMapSize; lv1InfoMapIdx < lv1InfoMapMax; lv1InfoMapIdx++)
+        {
+            var lv1Info = lv1LitShadowInfoIndexMapPtr[lv1InfoMapIdx];
+            Color uv = lv1Info;
+            float litOrShadow = uv.r;
+            float v = uv.g;
+            float depth = DecodeFloatRG(new Vector2(uv.b, uv.a));
+            int nV = Mathf.RoundToInt(v * 31.0f);
+            int nDepth = Mathf.RoundToInt(depth * (float)(lv23TextureArraySize - 1));
+            uint* line = (uint*)litShadowInfoMapArrayLv3NaLstTotal[nDepth].GetUnsafePtr() + nV * 32;
+            uint nNewDepth = (uint)line[0];
+            uint nNewV = (uint)line[1];
+            float fNewDepth = nNewDepth / (float)(lv3TextureArraySizeFinal - 1);
+            float fNewV = (float)nNewV / 31.0f;
+            Vector2 encodedDepth = EncodeFloatRG(fNewDepth);
+            lv1LitShadowInfoIndexMapPtr[lv1InfoMapIdx] = new Color(litOrShadow, fNewV, encodedDepth.x, encodedDepth.y);
+        }
+
+        texLines32.ForEach((texLine) =>
+        {
+            FreeMem(texLine.ToPointer());
+        });
+        
+#else
+        Texture2DArray litShadowInfoMapArrayLv4 = new Texture2DArray(64, 64, lv4TextureArraySize, TextureFormat.RGBA32, false, true);
+#endif
+#if _ENABLE_STRIP_
+        Texture2DArray litShadowInfoMapArrayLv3 = new Texture2DArray(32, 32, lv3TextureArraySizeFinal, TextureFormat.RGBA32, false, true);
+#else
+        Texture2DArray litShadowInfoMapArrayLv3 = new Texture2DArray(32, 32, lv23TextureArraySize, TextureFormat.RGBA32, false, true);
+#endif
+        
+        for (int texArrayDepth = 0, maxDepth = litShadowInfoMapArrayLv3.depth; texArrayDepth < maxDepth; texArrayDepth++)
+        {
+            var pixels2 = litShadowInfoMapArrayLv3.GetPixels(texArrayDepth, 0);
+            MultiCoreMemSetBlack(pixels2);
+            litShadowInfoMapArrayLv3.SetPixels(pixels2, texArrayDepth);
+            litShadowInfoMapArrayLv3.Apply(false, false);
+        }
+
 
 #if _ENABLE_BIG_TEX
         //litShadowInfoMapArrayLv3.SetPixels(colorBlock32x32, Mathf.Min(texDepth, litShadowInfoMapArrayLv3.depth - 1), 0);
@@ -688,15 +1060,30 @@ public partial class ShadowmapBaker
             //subArray.CopyFrom(colorBlock32x32);
             for (int copyDepth = 0, maxDepth = litShadowInfoMapArrayLv3.depth; copyDepth < maxDepth; copyDepth++)
             {
+#if _ENABLE_STRIP_
+                litShadowInfoMapArrayLv3.SetPixelData<Color32>(litShadowInfoMapArraylv3NaFinal.GetSubArray(32 * 32 * copyDepth, 32 * 32), 0, copyDepth);
+#else
                 litShadowInfoMapArrayLv3.SetPixelData<Color32>(litShadowInfoMapArrayLv3Na.GetSubArray(32 * 32 * copyDepth, 32 * 32), 0, copyDepth);
+#endif
             }
-            
+
             for (int copyDepth = 0, maxDepth = litShadowInfoMapArrayLv4.depth; copyDepth < maxDepth; copyDepth++)
             {
+#if _ENABLE_STRIP_
+                litShadowInfoMapArrayLv4.SetPixelData<Color32>(litShadowInfoMapArrayLv4NaFinal.GetSubArray(64 * 64 * copyDepth, 64 * 64), 0, copyDepth);
+#else
                 litShadowInfoMapArrayLv4.SetPixelData<Color32>(litShadowInfoMapArrayLv4Na.GetSubArray(64 * 64 * copyDepth, 64 * 64), 0, copyDepth);
+#endif
             }
         }
 #endif
+
+                var savePathAsset = EditorUtility.SaveFolderPanel("保存路径", Application.dataPath, "");
+        var parentPath = FileUtil.GetProjectRelativePath(savePathAsset);
+
+        litShadowInfoArrayLv1Na.Dispose();
+        litShadowInfoArrayLv2Na.Dispose();
+        litShadowInfoArrayLv3Na.Dispose();
 
 
         //AssetDatabase.DeleteAsset("Assets/litShadowInfoArray.asset");
@@ -714,6 +1101,7 @@ public partial class ShadowmapBaker
         AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
 
+        FreeMem(mLitShadowInfoArrayLv4Nalayout);
         System.GC.Collect();
 
         litShadowInfoMapArrayLv3.Apply(false, false);
@@ -726,24 +1114,28 @@ public partial class ShadowmapBaker
         litShadowInfoMapArrayLv4.filterMode = FilterMode.Point;
         AssetDatabase.CreateAsset(litShadowInfoMapArrayLv4, parentPath + "/litShadowInfoMapArrayLv4.asset");
 
-        litShadowInfoMapArray.Apply(false, false);
-        AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-        if (litShadowInfoMapArray != null)
-        {
-            litShadowInfoMapArray.wrapMode = TextureWrapMode.Clamp;
-            litShadowInfoMapArray.filterMode = FilterMode.Point;
-        }
+        //litShadowInfoMapArray.Apply(false, false);
+        //AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+        //if (litShadowInfoMapArray != null)
+        //{
+        //    litShadowInfoMapArray.wrapMode = TextureWrapMode.Clamp;
+        //    litShadowInfoMapArray.filterMode = FilterMode.Point;
+        //}
         AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
 
         // setup material property
         litMaterial.SetFloat("_ShadowAlpha", 0.549f);
-        litMaterial.SetFloat("_ShadowBias", 8.0f);
+        litMaterial.SetFloat("_ShadowBias", 0.0f);
         litMaterial.SetFloat("_ShadowBias1", 0.33f);
         litMaterial.SetFloat("_DEBUG_FACT", 0.00f);
         litMaterial.SetFloat("_level1TexSize", litShadowInfoIndexMapSize);
-        litMaterial.SetFloat("_level2TexArrayDepth", lv23TextureArraySize - 1);
+        litMaterial.SetFloat("_level2TexArrayDepth", lv3TextureArraySizeFinal - 1);
+#if _ENABLE_STRIP_
+        litMaterial.SetFloat("_level4TexArrayDepth", lv4TextureArraySizeFinal - 1);
+#else
         litMaterial.SetFloat("_level4TexArrayDepth", lv4TextureArraySize - 1);
+#endif
 
         // lv1VoxelWidth world space
         float lv1VoxelWidth = OrthoProjSize * 2.0f / rootVoxelSize;
@@ -995,29 +1387,80 @@ public partial class ShadowmapBaker
     private unsafe int DownSample(int targetVoxelSize, int originVoxelSize, byte* targetLitShadowInfoArray,
          byte* originLitShadowInfoArray, int kernelSize = 2 /* 2 * 2 */)
     {
+        ResetProgress();
         UnityEngine.Assertions.Assert.AreEqual(originVoxelSize / targetVoxelSize, kernelSize, "## Downsample error, kernelSize is not valid.");
         List<Task> pendingTask = new List<Task>();
         List<Task> pendingTask1 = new List<Task>();
         var mainThread = System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext();
-        int originAreaSize = originVoxelSize * originVoxelSize;
-        int targetAreaSize = targetVoxelSize * targetVoxelSize;
+        long originAreaSize = (long)originVoxelSize * (long)originVoxelSize;
+        long targetAreaSize = (long)targetVoxelSize * (long)targetVoxelSize;
+        int taskProgress = 0;
+
+        Init((uint)8, (uint)8 * (uint)kernelSize, (uint)targetVoxelSize, (uint)originVoxelSize / (uint)targetVoxelSize);
         // summary to root
-        for (int dBlockIndex = 0, dBlockIdxMax = targetVoxelSize; dBlockIndex < dBlockIdxMax; dBlockIndex++)
+        for (long dBlockIndex = 0, dBlockIdxMax = (long)targetVoxelSize; dBlockIndex < dBlockIdxMax; dBlockIndex++)
         {
-            int dBlockIndexTmp = dBlockIndex;
+            long dBlockIndexTmp = dBlockIndex;
             //var lv1BlockPixels = targetLitShadowInfoArray.GetSubArray(dBlockIndex * targetAreaSize, targetAreaSize);
-            byte* lv1BlockPixels = (byte*)targetLitShadowInfoArray[dBlockIndex * targetAreaSize];
+            byte* lv1BlockPixels = (byte*)targetLitShadowInfoArray + dBlockIndex * targetAreaSize;
             //var lv2BlockPixelsFront = originLitShadowInfoArray.Slice(dBlockIndex * areaSize); //.GetPixels(kernelSize * dBlockIndex);
             //var lv2BlockPixelsBack = originLitShadowInfoArray.GetPixels(kernelSize * dBlockIndex + 1);
             List<System.IntPtr> subDepths = new List<System.IntPtr>();
+            List<NativeArray<byte>> downsampledTemp = new List<NativeArray<byte>>(8);
             for (int subDepthIdx = 0; subDepthIdx < kernelSize; subDepthIdx++)
             {
-                subDepths.Add(new IntPtr(originLitShadowInfoArray[(kernelSize * dBlockIndex + subDepthIdx) * originAreaSize]));
+                subDepths.Add(new IntPtr(originLitShadowInfoArray + ((long)kernelSize * dBlockIndex + (long)subDepthIdx) * originAreaSize));
+                downsampledTemp.Add(new NativeArray<byte>(targetVoxelSize * targetVoxelSize, Allocator.Persistent));
                 //subDepths.Add(originLitShadowInfoArray.Slice<byte>((kernelSize * dBlockIndex + subDepthIdx) * originAreaSize, originAreaSize));
             }
 
             var task = Task.Run(() =>
             {
+#if _ENABLE_CUDA
+                for(int subDepth=0,subDepthMax = subDepths.Count; subDepth < subDepthMax; subDepth++)
+                {
+                    void* subTex = subDepths[subDepth].ToPointer();
+                    void* targetTex = downsampledTemp[subDepth].GetUnsafePtr();
+                    Downsample(targetTex, subTex, (uint)targetVoxelSize, (uint)kernelSize);
+                }
+
+                for (int vBlockIndex = 0, vBlockIdxMax = targetVoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
+                {
+                    for (int uBlockIndex = 0, uBlockIdxMax = targetVoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
+                    {
+                        bool isAllDepthWhite = true;
+                        bool isAllDepthBlack = true;
+                        for (int subDepth = 0, subDepthMax = subDepths.Count; subDepth < subDepthMax; subDepth++)
+                        {
+                            var pData = (byte*)downsampledTemp[subDepth].GetUnsafeReadOnlyPtr();
+                            isAllDepthWhite &= Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f - 1) < 0.1f;
+                            isAllDepthBlack &= Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f) < 0.1f;
+                        }
+
+                        // isAllDepthWhite &= downsampledTemp.TrueForAll((b) =>
+                        //{
+                        //    var pData = (byte*)b.GetUnsafeReadOnlyPtr();
+                        //    return Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f - 1) < 0.1f;
+                        //});
+                        //isAllDepthBlack &= downsampledTemp.TrueForAll((b) =>
+                        //{
+                        //    var pData = (byte*)b.GetUnsafeReadOnlyPtr();
+                        //    return Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f) < 0.1f;
+                        //});
+
+                        bool isBlockIntersection = !isAllDepthWhite && !isAllDepthBlack;
+                        var blockResult = (isAllDepthWhite ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
+                        lv1BlockPixels[(long)vBlockIndex * (long)uBlockIdxMax + (long)uBlockIndex] = (byte)Mathf.RoundToInt(blockResult * 255);
+                    }
+                }
+
+                downsampledTemp.ForEach((temp) =>
+                {
+                    temp.Dispose();
+                });
+                
+#else
+
                 for (int vBlockIndex = 0, vBlockIdxMax = targetVoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
                 {
                     for (int uBlockIndex = 0, uBlockIdxMax = targetVoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
@@ -1037,41 +1480,40 @@ public partial class ShadowmapBaker
                                 isAllDepthWhite &= subDepths.TrueForAll((b) =>
                                 {
                                     var pData = (byte*)b.ToPointer();
-                                    return Mathf.Abs(pData[vPixel * originVoxelSize + uPixel] / 255.0f - 1) < 0.1f;
+                                    return Mathf.Abs(pData[(long)vPixel * (long)originVoxelSize + (long)uPixel] / 255.0f - 1) < 0.1f;
                                 });
                                 isAllDepthBlack &= subDepths.TrueForAll((b) =>
                                 {
                                     var pData = (byte*)b.ToPointer();
-                                    return Mathf.Abs(pData[vPixel * originVoxelSize + uPixel] / 255.0f) < 0.1f;
+                                    return Mathf.Abs(pData[(long)vPixel * (long)originVoxelSize + (long)uPixel] / 255.0f) < 0.1f;
                                 });
                             }
                         }
                         bool isBlockIntersection = !isAllDepthWhite && !isAllDepthBlack;
                         var blockResult = (isAllDepthWhite ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
-                        lv1BlockPixels[vBlockIndex * uBlockIdxMax + uBlockIndex] = (byte)Mathf.RoundToInt(blockResult * 255);
+                        lv1BlockPixels[(long)vBlockIndex * (long)uBlockIdxMax + (long)uBlockIndex] = (byte)Mathf.RoundToInt(blockResult * 255);
                     }
                 }
-            });
+#endif
+                IncreaseProgress();
+            }, mCancelAllTask.Token);
             //var task1 = new Task(() =>
             //{
             //    targetLitShadowInfoArray.(lv1BlockPixels, dBlockIndexTmp, 0);
             //});
 
             pendingTask.Add(task);
-            if (pendingTask.Count > 64)
+            if (pendingTask.Count > 4)
             {
-                Task.WaitAll(pendingTask.ToArray());
+                WaitPendingTask(targetVoxelSize, true, false, "Calculating", "DownSample from" + originVoxelSize + " to " + targetVoxelSize, pendingTask);
                 pendingTask.Clear();
             }
             //pendingTask1.Add(task1);
 
         }
 
-        Task.WaitAll(pendingTask.ToArray());
-        //pendingTask1.ForEach((t) =>
-        //{
-        //    t.RunSynchronously();
-        //});
+        WaitPendingTask(targetVoxelSize, true, false, "Calculating", "DownSample from" + originVoxelSize+ " to " + targetVoxelSize, pendingTask);
+        Close();
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
         return 0;
@@ -1149,6 +1591,16 @@ public partial class ShadowmapBaker
         System.GC.Collect();
     }
 
+    [MenuItem("Tools/LoadTextureFromByte")]
+    public static void CreateTextureFromByte()
+    {
+        TextAsset byteData = Selection.activeObject as TextAsset;
+        Texture2D tex = new Texture2D(4096, 4096, TextureFormat.Alpha8, false, true);
+        tex.SetPixelData<byte>(byteData.bytes, 0);
+        tex.Apply(false, false);
+        AssetDatabase.CreateAsset(tex, "Assets/tex.asset");
+    }
+
     public static void CompressLv4Tex()
     {
         var lv4TexArray = Selection.activeObject as Texture2DArray;
@@ -1171,6 +1623,137 @@ public partial class ShadowmapBaker
         AssetDatabase.CreateAsset(lv4TexArray, "Assets/compressedTexArray.asset");
     }
 
+    [MenuItem("Tools/TestCuda1")]
+    public static void TestCuda1()
+    {
+        var lv4TexArray = Selection.activeObject as Texture2D;
+        Texture2D subTex = new Texture2D(lv4TexArray.width / 2, lv4TexArray.height / 2, TextureFormat.Alpha8, false, true);
+        var targetTexNa = subTex.GetRawTextureData<byte>();
+        byte* originTex = (byte*)lv4TexArray.GetRawTextureData<byte>().GetUnsafePtr();
+        byte* targetTex = (byte*)targetTexNa.GetUnsafePtr();
+        Init(8, 8, (uint)subTex.width, 2);
+        uint width = (uint)subTex.width;
+
+        object obj = new object();
+        List<Task> tasks = new List<Task>();
+        for (int i1 = 0; i1 < 128; i1++)
+        {
+            var task = Task.Run(() =>
+            {
+                for (int i = 0; i < 16; i++)
+                {
+                    Downsample(targetTex, originTex, (uint)width, 2);
+                }
+            });
+            tasks.Add(task);
+        }
+
+        Task.WaitAll(tasks.ToArray());
+        Close();
+        subTex.SetPixelData<byte>(targetTexNa, 0);
+        //subTex.LoadRawTextureData<byte>(targetTexNa);
+        subTex.Apply(false, false);
+        var colArray = subTex.GetRawTextureData();
+        for (int i = 0; i < 32; i++) {
+            Debug.Log(targetTex[i * 32]);
+            Debug.Log(colArray[i * 32]);
+        }
+        
+        AssetDatabase.CreateAsset(subTex, "Assets/subTex.asset");
+    }
+
+    [MenuItem("Tools/TestLoadAlpha8Bin")]
+    public static void TestLoadAlpha8Bin()
+    {
+        var fileStream = new System.IO.FileStream("litshadowmapSSD/voxel_lv_975.gzip", System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite);
+
+        //fileStream.Seek(0, System.IO.SeekOrigin.End);
+        NativeArray<byte> data = new NativeArray<byte>(16777216, Allocator.Temp);
+
+
+        //var fileStream = new System.IO.FileStream(string.Format(LitShadowMapPath + "voxel_lv_{0}.gzip", texIdx), System.IO.FileMode.CreateNew, System.IO.FileAccess.ReadWrite);
+        byte* ptr = (byte*)data.GetUnsafePtr();
+        var gzipStream = new System.IO.Compression.DeflateStream(fileStream, System.IO.Compression.CompressionMode.Decompress);
+        var writeMem = new System.IO.UnmanagedMemoryStream(ptr, 1024,4096 * 4096, System.IO.FileAccess.Write);
+
+        Debug.Log(fileStream.Length);
+        var task = gzipStream.CopyToAsync(writeMem);
+        while (!task.IsCompleted)
+            System.Threading.Thread.Sleep(300);
+        Texture2D tex = new Texture2D(4096, 4096, TextureFormat.Alpha8, false, true);
+        tex.LoadRawTextureData<byte>(data);
+        tex.Apply(false, false);
+        AssetDatabase.CreateAsset(tex, "Assets/decompressedTex.asset");
+    }
+
+    [MenuItem("Tools/TestUnmanagedArray")]
+    public unsafe static void TestUnmanagedArray()
+    {
+        int dataSize = 4096 * 4096;
+        int boundSize = LZ4_compressBound(dataSize);
+        byte* arrayPtr = (byte*)AllocMem((ulong)dataSize);
+        byte* arrayCompressedPtr = (byte*)AllocMem((ulong)boundSize);
+        byte* arrayDecompressedPtr = (byte*)AllocMem((ulong)dataSize);
+        for (int i = 0; i < dataSize; i++)
+        {
+            arrayPtr[i] = 255;// (byte)UnityEngine.Random.Range(8, 255);
+        }
+        int compressedSize = LZ4_compress_fast(arrayPtr, arrayCompressedPtr, dataSize, boundSize, 0);
+        int state = LZ4_decompress_safe(arrayCompressedPtr, arrayDecompressedPtr, compressedSize, dataSize);
+        using(var mem = new System.IO.UnmanagedMemoryStream(arrayDecompressedPtr, dataSize, dataSize, System.IO.FileAccess.Read))
+        {
+            using(var f = new System.IO.FileStream("decompressed_array.bytes", System.IO.FileMode.Create, System.IO.FileAccess.Write))
+            {
+                mem.CopyTo(f);
+            }
+        }
+        FreeMem(arrayPtr);
+        FreeMem(arrayCompressedPtr);
+        FreeMem(arrayDecompressedPtr);
+    }
+
+    [MenuItem("Tools/TestDecompressTex")]
+    public unsafe static void TestDecompressTex()
+    {
+        for (int idx = 0; idx < 2048; idx++) {
+            if (idx % 128 != 0) continue;
+            int textureAreaSize = 4096 * 4096 + 1024 * 8;
+            var texNa = new NativeArray<byte>(textureAreaSize, Allocator.Temp);
+            var ptr = (byte*)texNa.GetUnsafePtr();
+            var fileInfo = new System.IO.FileInfo(string.Format(LitShadowMapPath + "voxel_lv_{0}.lz4", idx));
+            
+            var fileStreamLz4 = new System.IO.FileStream(string.Format(LitShadowMapPath + "voxel_lv_{0}.lz4", idx), System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite);
+
+            uint compressedSize = (uint)fileInfo.Length;
+
+            ((byte*)&compressedSize)[0] = (byte)fileStreamLz4.ReadByte();
+            ((byte*)&compressedSize)[1] = (byte)fileStreamLz4.ReadByte();
+            ((byte*)&compressedSize)[2] = (byte)fileStreamLz4.ReadByte();
+            ((byte*)&compressedSize)[3] = (byte)fileStreamLz4.ReadByte();
+            //fileStreamLz4.Seek(2, System.IO.SeekOrigin.Begin);
+
+            var bufferNa = new NativeArray<byte>((int)compressedSize , Allocator.Temp);
+            var bufferUnmanged = new System.IO.UnmanagedMemoryStream((byte*)bufferNa.GetUnsafePtr(), compressedSize , compressedSize, System.IO.FileAccess.Write);
+
+            try
+            {
+                fileStreamLz4.CopyTo(bufferUnmanged, (int)compressedSize);
+                //LZ4_decompress_safe_continue(lz4Stream, buffer, ptr, 4096 * 4096, 4096 * 4096);
+                int decodeSize = LZ4_decompress_safe((byte*)bufferNa.GetUnsafePtr(), ptr, (int)compressedSize, textureAreaSize);
+                Debug.Log(decodeSize);
+            }
+            finally
+            {
+                bufferNa.Dispose();
+                bufferUnmanged.Dispose();
+                fileStreamLz4.Close();
+            }
+            Texture2D tex = new Texture2D(4096, 4096, TextureFormat.Alpha8, false, true);
+            tex.SetPixelData<byte>(texNa, 0);
+            tex.Apply(false, false);
+            AssetDatabase.CreateAsset(tex, "Assets/decompressedTexs/tex_" + idx + ".asset");
+        }
+    }
     struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch
     {
         public void Execute(int index)

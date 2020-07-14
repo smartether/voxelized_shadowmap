@@ -16,7 +16,7 @@
 #else //if !defined(_ENABLE_PREDICT_ON)
 #undef _ENABLE_VOXEL_PREDICT
 #endif
- 
+ #define _LIT_SCREEN_SPACE_MODE
 
 // high precision mode
 //#define _SHADOWMAP_LITE1
@@ -55,6 +55,7 @@ float4x4 _LitProjMatrixGPU;
 float4x4 _LitViewProjMatrix;
 
 uniform float _DEBUG_FACT;
+uniform float _DEBUG_FACT_10;
 
 uniform float _ShadowAlpha;
 uniform float _ShadowBias;
@@ -118,12 +119,12 @@ VoxelizedSM_Info Voxelized_vertex(in VertexInfo v) {
                 float4 litSpaceClipPos = (float4)0;
                 #ifdef _MODE_GPUMATRIX_ON       
                     litSpaceClipPos = mul(_LitProjMatrixGPU, float4(0, 0 , _ShadowBias,0) + viewPos);        
-                    litSpaceClipPos.xy = litSpaceClipPos.xy / litSpaceClipPos.w * 0.5 + 0.5;      
+                    litSpaceClipPos.xy = saturate(litSpaceClipPos.xy / litSpaceClipPos.w * 0.5 + 0.5);      
                     litSpaceClipPos.z = 1 - litSpaceClipPos.z;      
                     litSpaceClipPos.w = 1;
                 #else       
-                    litSpaceClipPos = mul(_LitProjMatrix, float4(0, 0 , _ShadowBias,0) + viewPos);       
-                    litSpaceClipPos.xyz = litSpaceClipPos.xyz / litSpaceClipPos.w * 0.5 + 0.5;        
+                    litSpaceClipPos = mul(_LitProjMatrix, float4(0, 0 , _ShadowBias,0) + viewPos);     
+                    litSpaceClipPos.xyz = saturate(litSpaceClipPos.xyz / litSpaceClipPos.w * 0.5 + 0.5);       
                     litSpaceClipPos.z = 1 - litSpaceClipPos.z;      
                     litSpaceClipPos.w = 1;
                 #endif      
@@ -282,8 +283,12 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                         voxelPos = floor(litSpaceClipPos * _VoxelParams.z);
                         voxelPosLv2 = floor(litSpaceClipPos * _VoxelParamsLv2.z);
                         voxelPosLv3 = floor(litSpaceClipPos * _VoxelParamsLv3.z);
-                        voxelIdLv3 = floor(litSpaceClipPos.z * _VoxelParams.z % 1 * 4);
-                        voxelIdLv4 = floor(litSpaceClipPos * _VoxelParamsLv3.z % 0.5 * 2 * 8);
+                        voxelIdLv3 = floor((voxelPos * 1.0) * 4.0);
+                        voxelIdLv4 = floor((litSpaceClipPos * _VoxelParamsLv3.z * 8.0) % 8.0);
+                        
+                        voxelIdLv3 = floor((litSpaceClipPos.z / _VoxelParamsLv3.w) % 4);
+                        voxelIdLv4 = floor((litSpaceClipPos / _VoxelParamsLv3.w % 1) * 8);
+                        
                         uVoxelPosLv3 = (uint)floor(litSpaceClipPos * _VoxelParamsLv3.z);
                         uVoxelPosLv2 = (uint)floor(litSpaceClipPos * _VoxelParamsLv2.z);
                         uVoxelPos = (uint)floor(litSpaceClipPos * _VoxelParams.z);
@@ -302,7 +307,6 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 // float4 level1LitInfoNoArray = tex2Dlod(_Level1IndexMapNoArray, float4(Level1IndexMapUV, 0,0));
                 float fact = 1.0 / 1024.0;
                 float lv2MapWidth = 32.0;
-                float lv4MapWidth = 64.0;
                 float lv2U_fact = 1.0 / lv2MapWidth;
                 float v = level1LitInfo.y;// DecodeFloatRG(level1LitInfo.zw);
                 float texDepth = DecodeFloatRG(level1LitInfo.zw);
@@ -340,11 +344,11 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 texArrayU = floor(voxelUnionPosLv2.y * 8 + voxelUnionPosLv2.x * 4 + voxelUnionPosLv3.y * 2 + voxelUnionPosLv3.x) / lv2MapWidth;
 
                 float4 arrayValue = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level2LitShadowInfoArray, (1 - isLv1ZeroOrOne) * float3(texArrayU,
-                v + _DEBUG_FACT,
-                round(texDepth * _level2TexArrayDepth) ), //floor(DecodeFloatRG(level1LitInfo.zw) * _level2TexArrayDepth) //
+                v,
+                round(texDepth * _level2TexArrayDepth)), //floor(DecodeFloatRG(level1LitInfo.zw) * _level2TexArrayDepth) //
                 0);
 
-                float4 lv4uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level2LitShadowInfoArray, float3(texArrayU + 16.0 / lv2MapWidth ,
+                float4 lv4uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level2LitShadowInfoArray, float3(texArrayU  + 16.0 / lv2MapWidth ,
                 v,
                 round(texDepth * _level2TexArrayDepth)), 0);
 
@@ -373,24 +377,31 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 // return fixed4(1,0,0,1);
                 // #endif
                 #ifdef _ENABLE_LV4_VOXEL
-                float lv4V = DecodeFloatRG(lv4uv.rg);
+                float lv4V = lv4uv.r + _DEBUG_FACT_10;// + _DEBUG_FACT + _DEBUG_FACT_10;// DecodeFloatRG(lv4uv.rg);
                 float flv4Depth = DecodeFloatRG(lv4uv.ba);
                 float lv4Depth = round(_level4TexArrayDepth * flv4Depth);
                 float lv4UPixelOffset = voxelIdLv3;//floor(voxelPosLv3.z % 4.0);
                 float3 lv4Pos = voxelIdLv4; // floor(voxelPosLv3 / (1.0 / 8.0)); // floor(voxelIdLv4 % 7.999);
-                float lv4UPixel = lv4Pos.y * 2 + lv4Pos.x / 4 + 16 * lv4UPixelOffset;
+                float lv4UPixel = floor(lv4Pos.y * 2.0) + floor(lv4Pos.x / 4.0) + floor(16 * lv4UPixelOffset);// + round(100 * _DEBUG_FACT_10);
                 //return voxelIdLv4.z / 8;
-                float lv4U = lv4UPixel / 64.0;
-                float4 lv4Color = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, float3(lv4U, lv4V , lv4Depth), 0);
+                float lv4U = lv4UPixel / 63.0;
+                float4 lv4Color = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, float3(lv4U, lv4V, lv4Depth), 0);
+                uint table1[] = {1,2,4,8,16,32,64,128};
+                uint flag = (uint)table1[(uint)round(lv4Pos.z)]; //(uint)(1u << (int)floor(lv4Pos.z)); // 
+                //return flag / 128.0;
+                // return (uint)round((1- lv4Color[floor(lv4Pos.x % 4.0)]) * 255.0) & flag;
+               
+                uint lvC = (uint)floor(lv4Color[floor(lv4Pos.x % 4.0)] * 255.0) & flag; //lv4Pos.x % 3.99
+                color4 = lvC > 0 ? 1 : shadowAlpha.xxxx;
+                color4 = max(color4, step(0.999, litSpaceClipPos.z));
+                //color4 = lv4Depth / 64.0;
+                //color4 = lvC > 0 ? fixed4(1,0,0,1) : fixed4(0,0,1,1);//shadowAlpha.xxxx;
                 
-                //uint table1[] = {1,2,4,8,16,32,64,128};
-                uint flag = table[(uint)floor(lv4Pos.z)]; //(uint)(1u << (int)floor(lv4Pos.z)); //
+                //color4 = lv4Color.r;
+                // color4 = 1;
+                //return lv4Color[floor(lv4Pos.x % 4)];
 
-                // return round(lv4Color[floor(lv4Pos.x % 3.9)] * 256) / 255;
-                uint lvC = (uint)round(lv4Color[floor(lv4Pos.x % 4)] * 256) & flag;
-                color4 = lvC == 1 ? 1 : shadowAlpha;
-                
-
+                //color4 = max(lvC, max(approxC, max(approxD, max(approxE, approxF)))) > 0 ? 1 : shadowAlpha;
                 finalCol = isLv1ZeroOrOne * colorIfOneOrZero + 
                     saturate(1 - isLv1ZeroOrOne) * isLv23ZeroOrOne * colorIfLv23OneOrZero + 
                     saturate(1 - isLv1ZeroOrOne) * saturate(1 - isLv23ZeroOrOne) * color4;

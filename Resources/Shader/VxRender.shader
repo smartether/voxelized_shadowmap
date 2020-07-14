@@ -28,8 +28,8 @@ Shader "Unlit/VxRender"
         // _Level1LitShadowInfoArrayDebug("_Level1LitShadowInfoArrayDebug", 2DArray) = "black"{}
         // _Level2LitShadowInfoArrayDebug("_Level2LitShadowInfoArrayDebug", 2DArray) = "black"{}
         // _Level3LitShadowInfoArrayDebug("_Level3LitShadowInfoArrayDebug", 2DArray) = "black"{}
-
-        _DEBUG_FACT("DEBUG_FACT", Float) = 1
+        _DEBUG_FACT_10("DEBUG_FACT", Range(-0.1, 0.1)) = 1
+        _DEBUG_FACT("DEBUG_FACT", Range(-0.01,0.01)) = 1
 		_ShadowDensity("_ShadowDensity", Float) = 1
 		_ShadowBalance("_ShadowBalance", Float) = 1
         [Toggle]_MODE_GPUMATRIX("_MODE_GPUMATRIX", int) = 0
@@ -185,7 +185,7 @@ LITINFO(11)
                 // voxelPos leftBottom=(0,0)
                 fixed4 col = tex2D(_MainTex, i.uv);
                 fixed4 col1;
-                TRANS_FRAG(o, col1)
+                TRANS_FRAG(i, col1)
 
                 //return pow(lerp(0, col, col1) * 1.6, 0.8);
 

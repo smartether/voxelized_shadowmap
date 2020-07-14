@@ -1,0 +1,114 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &688898052513591527
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 4647123225559811622}
+  - component: {fileID: 5521838297831461654}
+  m_Layer: 0
+  m_Name: vxShadowmap
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &4647123225559811622
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 688898052513591527}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_RootOrder: 0
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &5521838297831461654
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 688898052513591527}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 72a5688061270a045bc5bf19c06a8ee2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  vxShadowmapUniformDatas: []
+  vxShadowmapUniformData:
+    SceneName: Demo
+    SectionIndex: 0
+    _ShadowAlpha: 0.549
+    _ShadowBias: 0
+    _ShadowBias1: 0.33
+    _DEBUG_FACT: 0
+    _level1TexSize: 512
+    _level2TexArrayDepth: 84
+    _level4TexArrayDepth: 234
+    _ShadowDensity: 0
+    _ShadowBalance: 0.5
+    _VoxelParams: {x: 7.8125, y: 0.128, z: 64, w: 0.015625}
+    _VoxelParamsLv2: {x: 3.90625, y: 0.256, z: 128, w: 0.0078125}
+    _VoxelParamsLv3: {x: 1.953125, y: 0.512, z: 256, w: 0.00390625}
+    _ProjSizeParams: {x: 250, y: 0.004, z: 500, w: 0.002}
+    _LitViewMatrix:
+      e00: 0.42261836
+      e01: -0.00000004932484
+      e02: 0.9063077
+      e03: -166.18619
+      e10: -0.69427204
+      e11: 0.6427875
+      e12: 0.32374448
+      e13: 13.991515
+      e20: 0.5825633
+      e21: 0.76604444
+      e22: -0.27165377
+      e23: -590.4198
+      e30: 0
+      e31: 0
+      e32: 0
+      e33: 1
+    _LitProjMatrix:
+      e00: 0.004
+      e01: 0
+      e02: 0
+      e03: -0
+      e10: 0
+      e11: 0.004
+      e12: 0
+      e13: -0
+      e20: 0
+      e21: 0
+      e22: -0.004
+      e23: -1
+      e30: 0
+      e31: 0
+      e32: 0
+      e33: 1
+    _Level1IndexMap: {fileID: 2800000, guid: 402da0b1415a50443adca0d92bc419d9, type: 2}
+    _Level2LitShadowInfoArray: {fileID: 18700000, guid: 540dcfc7acf833b4bb65f5d01df505ee,
+      type: 2}
+    _Level4LitShadowInfoArray: {fileID: 18700000, guid: b945396ee95681e46b5c10228f3b06e8,
+      type: 2}
+    _VoxelShadowmap: {fileID: 0}
+    _Shadowmap: {fileID: 0}
+    _json: 
+--- !u!1029 &102900000
+DefaultAsset:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: 
+  m_Message: This default asset was generated because the worker process has crashed
+    during last import.
+  m_IsWarning: 1

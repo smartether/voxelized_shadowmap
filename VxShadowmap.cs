@@ -134,6 +134,14 @@ public class VxShadowmap : MonoBehaviour
         vxShadowmapUniformData.LoadUniformData();
     }
 
+    [ContextMenu("LoadMatrixFromEnv")]
+    public void LoadMatrix()
+    {
+        vxShadowmapUniformData._LitViewMatrix = Shader.GetGlobalMatrix("_LitViewMatrix");
+        vxShadowmapUniformData._LitProjMatrix = Shader.GetGlobalMatrix("_LitProjMatrix");
+    }
+
+#if UNITY_EDITOR
     [ContextMenu("Test")]
     public void Test()
     {
@@ -159,16 +167,11 @@ public class VxShadowmap : MonoBehaviour
         vxShadowmapPrefab.vxShadowmapUniformData = vxShadowmapUniformData;
         PrefabUtility.SaveAsPrefabAsset(vxShadowmapPrefab.gameObject, "Assets/vxShadowmap.prefab");
     }
+#endif
 
     // Start is called before the first frame update
     void Start()
     {
-        
-    }
-
-    // Update is called once per frame
-    void Update()
-    {
-        
+        LoadUniformData();
     }
 }
