@@ -1,0 +1,80 @@
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using Unity.Jobs;
+using Unity.Jobs.LowLevel;
+public class VxOnJobSystem : MonoBehaviour
+{
+    public unsafe struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch
+    {
+        int originWidth;
+        int originHeight;
+        int targetWidth;
+        int targetHeight;
+        System.Int64 _srcAddr;
+        System.Int64 _dstAddr;
+        public AccelerationJob(long srcAddr, long dstAddr, int originWidth, int originHeight, int targetWidth, int targetHeight)
+        {
+            _srcAddr = srcAddr;
+            _dstAddr = dstAddr;
+            this.originWidth = originWidth;
+            this.originHeight = originHeight;
+            this.targetWidth = targetWidth;
+            this.targetHeight = targetHeight;
+        }
+        public void Execute(int index)
+        {
+            unsafe
+            {
+                System.IntPtr _srcPtr = new System.IntPtr(_srcAddr);
+                System.IntPtr _dstPtr = new System.IntPtr(_dstAddr);
+                byte* srcPtr = (byte*)_srcPtr.ToPointer();
+                byte* dstPtr = (byte*)_dstPtr.ToPointer();
+                dstPtr[index] = (byte)(srcPtr[index] * srcPtr[index]);
+            }
+
+        }
+
+        public void Execute(int startIndex, int count)
+        {
+            
+        }
+    }
+
+    [ContextMenu("Test")]
+    public void Test()
+    {
+        long srcAddr = System.Runtime.InteropServices.Marshal.AllocHGlobal(1024).ToInt64();
+        long dstAddr = System.Runtime.InteropServices.Marshal.AllocHGlobal(1024).ToInt64();
+        unsafe
+        {
+            byte* src = (byte*)new System.IntPtr(srcAddr).ToPointer();
+            for (int i = 0; i < 1024; i++)
+            {
+                src[i] = 12;
+            }
+        }
+        new AccelerationJob(srcAddr,dstAddr,0,0,0,0).Schedule(1024, 32).Complete();
+        unsafe
+        {
+            byte* dst = (byte*)new System.IntPtr(dstAddr).ToPointer();
+            for (int i = 0; i < 1024; i++)
+            {
+                Debug.Log(dst[i]);
+            }
+        }
+    }
+
+    // Start is called before the first frame update
+    void Start()
+    { 
+        new AccelerationJob().Run(1024);
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        
+    }
+
+}
