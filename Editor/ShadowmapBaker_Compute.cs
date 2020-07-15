@@ -184,7 +184,7 @@ public unsafe partial class ShadowmapBaker
         List<Object> resourceToRelease = new List<Object>();
         var fileInfo = new System.IO.FileInfo(slicedFilePath + "/memoryMappingStripped.data");
         var voxelInfoMemory = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateFromFile(slicedFilePath + "/memoryMappingStripped.data", System.IO.FileMode.Open, "VoxelInfoMapFile", fileInfo.Length, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
-
+        
         unsafe
         {
             //Texture2D alphaTex =new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.Alpha8, false, true);

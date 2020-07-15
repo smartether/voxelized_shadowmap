@@ -452,7 +452,6 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                     else
                     {
                         texDataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Persistent);
-                        texDataArrayPool.Enqueue(texDataArray);
                     }
                     var texDataTmp = tex.GetRawTextureData<byte>();
                     texDataArray.CopyFrom(texDataTmp);
@@ -523,7 +522,6 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                         else
                         {
                             buffer = (byte*)AllocMem((ulong)boundSize);// new byte[textureAreaSize];
-                            memoryBufferPool.Enqueue(new IntPtr(buffer));
                         }
 
                         try
@@ -629,6 +627,14 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                 catch (System.InvalidOperationException e)
                 {
 
+                }
+            }
+
+            unsafe
+            {
+                while (memoryBufferPool.Count > 0)
+                {
+                    FreeMem(memoryBufferPool.Dequeue().ToPointer());
                 }
             }
 
