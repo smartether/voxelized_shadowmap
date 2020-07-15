@@ -348,7 +348,7 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 round(texDepth * _level2TexArrayDepth)), //floor(DecodeFloatRG(level1LitInfo.zw) * _level2TexArrayDepth) //
                 0);
 
-                float4 lv4uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level2LitShadowInfoArray, float3(texArrayU  + 16.0 / lv2MapWidth ,
+                float4 lv4uv = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level2LitShadowInfoArray, (1 - isLv1ZeroOrOne) * float3(texArrayU  + 16.0 / lv2MapWidth ,
                 v,
                 round(texDepth * _level2TexArrayDepth)), 0);
 
@@ -385,7 +385,7 @@ fixed4 VoxelizedFrag(in VoxelizedSM_Info i){
                 float lv4UPixel = floor(lv4Pos.y * 2.0) + floor(lv4Pos.x / 4.0) + floor(16 * lv4UPixelOffset);// + round(100 * _DEBUG_FACT_10);
                 //return voxelIdLv4.z / 8;
                 float lv4U = lv4UPixel / 63.0;
-                float4 lv4Color = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, float3(lv4U, lv4V, lv4Depth), 0);
+                float4 lv4Color = UNITY_SAMPLE_TEX2DARRAY_LOD(_Level4LitShadowInfoArray, (1 - isLv23ZeroOrOne) * float3(lv4U, lv4V, lv4Depth), 0);
                 uint table1[] = {1,2,4,8,16,32,64,128};
                 uint flag = (uint)table1[(uint)round(lv4Pos.z)]; //(uint)(1u << (int)floor(lv4Pos.z)); // 
                 //return flag / 128.0;

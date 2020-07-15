@@ -27,8 +27,6 @@ public unsafe partial class ShadowmapBaker
 {
     const string DLL_NAME = "VoxelizedKernel.dll";
     // 64Bit size memory allocate
-    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi, EntryPoint = "malloc")]
-    public static extern void* malloc(ulong size);
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "AllocMem")]
     public static extern void* AllocMem(ulong size);
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "FreeMem")]
@@ -134,10 +132,10 @@ public unsafe partial class ShadowmapBaker
     // compute lv3 lit or shadow info first, then summary to lv2 and rootLv1
     unsafe void precomputeVoxelDepth()
     {
-        renderMode = RenderMode.Shadowmap;
-        bake();
-        renderMode = RenderMode.VoxelShadowmapDiff;
-        bake();
+        //renderMode = RenderMode.Shadowmap;
+        //bake();
+        //renderMode = RenderMode.VoxelShadowmapDiff;
+        //bake();
         RootVoxelWidthSize = RootVoxelWidthSize / 8 / 4;
 #if _MEMMAP_
         //var slicedFilePath = UnityEditor.EditorUtility.SaveFolderPanel("memory mapfile", Application.dataPath, "");
@@ -293,10 +291,10 @@ public unsafe partial class ShadowmapBaker
                                 int decodeSize = LZ4_decompress_safe((byte*)bufferPtr, ptr, (int)compressedSize, textureAreaSize);
                                 //Debug.Log(decodeSize);
 
-                                if (dVoxelIndexTmp % 256 == 0)
-                                {
-                                    System.IO.File.WriteAllBytes(dataPathTmp + "/tex_" + dVoxelIndexTmp + ".bytes", voxelLitShadowInfoNA.ToArray());    
-                                }
+                                //if (dVoxelIndexTmp % 256 == 0)
+                                //{
+                                //    System.IO.File.WriteAllBytes(dataPathTmp + "/tex_" + dVoxelIndexTmp + ".bytes", voxelLitShadowInfoNA.ToArray());    
+                                //}
                             }
                             finally
                             {

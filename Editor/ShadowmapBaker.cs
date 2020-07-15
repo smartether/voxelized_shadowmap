@@ -347,9 +347,25 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
             int memoryOffset = RootVoxelWidthSize * 8;
             uint totalCompressSize1 = 0;
 #endif
+
+            Queue<NativeArray<byte>> texDataArrayPool = new Queue<NativeArray<byte>>(16);
+            Queue<IntPtr> memoryBufferPool = new Queue<IntPtr>(16);
+           
             for (int i = 0, c = RootVoxelWidthSize /*Mathf.CeilToInt(farClip / VoxelSize)*/; i < c; i++)
             {
                 UnityEditor.EditorUtility.DisplayProgressBar("", "render voxel slice", i / (float)RootVoxelWidthSize);
+
+                //AssetDatabase.CreateAsset(tex, "Assets/tex.asset");
+
+                if (copyTasks.Count > 16)
+                {
+                    Task.WaitAll(copyTasks.ToArray());
+                    copyTasks.Clear();
+                    streams.ForEach((stream) => stream.Dispose());
+                    streams.Clear();
+                    disposables.ForEach((dispose) => texDataArrayPool.Enqueue((NativeArray<byte>)dispose));
+                    disposables.Clear();
+                }
                 tmpRt.DiscardContents(true, true);
                 cmb.Clear();
                 cmb.SetViewProjectionMatrices(shadowmapViewMatrix, GL.GetGPUProjectionMatrix(shadowmapProjMatrix, true));
@@ -396,41 +412,54 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
 
 #else
 
-                var rawDataArray = new NativeArray<byte>();
-
-                if (SystemInfo.supportsAsyncGPUReadback)
+                NativeArray<byte> texDataArray = default(NativeArray<byte>);
+                bool isFinished = false;
+                if (SystemInfo.supportsAsyncGPUReadback && false)   // readback接口不稳定 会导致奔溃
                 {
-                    rawDataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Temp);
-                    var aReq = AsyncGPUReadback.RequestIntoNativeArray<byte>(ref rawDataArray, tmpRt, 0, TextureFormat.Alpha8, (req) =>
+                    var dataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Temp);
+                    UnityEngine.Rendering.AsyncGPUReadbackRequest readBackReq = default(UnityEngine.Rendering.AsyncGPUReadbackRequest);
+                    if (texDataArrayPool.Count > 0)
                     {
-
+                        texDataArray = texDataArrayPool.Dequeue();
+                    }
+                    else
+                    {
+                        texDataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Persistent);
+                        texDataArrayPool.Enqueue(texDataArray);
+                    }
+                    readBackReq = AsyncGPUReadback.RequestIntoNativeArray<byte>(ref dataArray, tmpRt, 0, TextureFormat.Alpha8, (req) =>
+                    {
+                        isFinished = true;
                     });
-                    aReq.WaitForCompletion();
+                    readBackReq.WaitForCompletion();
+                    texDataArray.CopyFrom(dataArray);
                 }
                 else
                 {
                     Texture2D tex = new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.Alpha8, false, true);
                     var activeTmp = RenderTexture.active;
                     RenderTexture.active = tmpRt;
+                    //tex =  ScreenCapture.CaptureScreenshotAsTexture(shadowMap.width);
                     tex.ReadPixels(new Rect(0, 0, shadowMap.width, shadowMap.height), 0, 0, false);
                     tex.Apply(false, false);
                     RenderTexture.active = activeTmp;
-                    rawDataArray = tex.GetRawTextureData<byte>();
-
+                    isFinished = true;
+                    
+                    if (texDataArrayPool.Count > 0)
+                    {
+                        texDataArray = texDataArrayPool.Dequeue();
+                    }
+                    else
+                    {
+                        texDataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Persistent);
+                        texDataArrayPool.Enqueue(texDataArray);
+                    }
+                    var texDataTmp = tex.GetRawTextureData<byte>();
+                    texDataArray.CopyFrom(texDataTmp);
+                    GameObject.DestroyImmediate(tex);
                 }
 
 
-                //AssetDatabase.CreateAsset(tex, "Assets/tex.asset");
-
-                if (copyTasks.Count > 256)
-                {
-                    Task.WaitAll(copyTasks.ToArray());
-                    copyTasks.Clear();
-                    streams.ForEach((stream) => stream.Dispose());
-                    streams.Clear();
-                    disposables.ForEach((dispose) => dispose.Dispose());
-                    disposables.Clear();
-                }
                 /*
                 if(texIdx % 128 == 0)
                 {
@@ -444,11 +473,14 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                 */
                 unsafe
                 {
-                    var copyDataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Persistent);
-                    copyDataArray.CopyFrom(rawDataArray);
-                    var ptr = (byte*)copyDataArray.GetUnsafeReadOnlyPtr();
+
+
 
 #if !_LZ4_COMPRESS_
+                    var copyDataArray = new NativeArray<byte>(shadowMap.width * shadowMap.height, Allocator.Persistent);
+                    copyDataArray.CopyFrom(rawDataArray);
+                    rawDataArray.Dispose();
+                    var ptr = (byte*)copyDataArray.GetUnsafeReadOnlyPtr();
                     var memStream = new System.IO.UnmanagedMemoryStream((byte*)copyDataArray.GetUnsafeReadOnlyPtr(), tex.width * tex.height);
                     {
                         var fileStream = new System.IO.FileStream(string.Format(LitShadowMapPath + "voxel_lv_{0}.gzip", texIdx), System.IO.FileMode.Create, System.IO.FileAccess.ReadWrite);
@@ -468,22 +500,35 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
 
                     }
 #else
-
                     int textureAreaSize = shadowMap.width * shadowMap.height;
                     int texIdxTmp = texIdx;
                     var lz4Task = Task.Run(() =>
                     {
+
+                        //copyDataArray.CopyFrom(rawDataArray);
+                        //rawDataArray.Dispose();
+
+                        var ptr = (byte*)texDataArray.GetUnsafeReadOnlyPtr();
 #if !_MEMMAP_
                         using (var fileStream1 = new System.IO.FileStream(string.Format(LitShadowMapPath + "voxel_lv_{0}.lz4", texIdxTmp), System.IO.FileMode.Create, System.IO.FileAccess.ReadWrite))
 
                     {
 #endif
                         int boundSize = LZ4_compressBound(textureAreaSize);
-                        byte* buffer = (byte*)AllocMem((ulong)boundSize);// new byte[textureAreaSize];
+                        byte* buffer = null;
+                        if (memoryBufferPool.Count > 0)
+                        {
+                            buffer = (byte*)memoryBufferPool.Dequeue().ToPointer();
+                        }
+                        else
+                        {
+                            buffer = (byte*)AllocMem((ulong)boundSize);// new byte[textureAreaSize];
+                            memoryBufferPool.Enqueue(new IntPtr(buffer));
+                        }
 
                         try
                         {
-                            var lz4Stream = LZ4_createStream();
+                            //var lz4Stream = LZ4_createStream();
                             //ushort compressedblockSize = (ushort)LZ4_compress_default((byte*)ptr, buffer, textureAreaSize, textureAreaSize + boundSize); //
                             int compressedblockSize = LZ4_compress_fast((byte*)ptr, buffer, textureAreaSize, boundSize, 0);
                             //ushort compressedblockSize = (ushort)LZ4_compress_fast_continue(lz4Stream, (byte*)copyDataArray.GetUnsafeReadOnlyPtr(), buffer, textureAreaSize, textureAreaSize, 0);
@@ -494,7 +539,7 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                             fileStream1.WriteByte(((byte*)&compressedBlockSizeU)[2]);
                             fileStream1.WriteByte(((byte*)&compressedBlockSizeU)[3]);
 #endif
-                            
+
                             using (var ummem = new System.IO.UnmanagedMemoryStream(buffer, compressedblockSize))
                             {
 #if !_MEMMAP_
@@ -502,7 +547,7 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
 #else
                                 //while (lockObj.IsWriteLockHeld || !lockObj.TryEnterWriteLock(300));
                                 //lockObj.EnterWriteLock();
-                                
+
                                 using (var headReadWrite = voxelInfoMemory.CreateViewStream(texIdxTmp * 8, 8, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite))
                                 {
                                     uint memoryOffsetTmp = 0;
@@ -538,11 +583,15 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
 #endif
                                 //lockObj.ExitWriteLock();
                             }
-                            LZ4_freeStream(lz4Stream);
+                            //LZ4_freeStream(lz4Stream);
                         }
                         finally
                         {
-                            FreeMem(buffer);
+                            lockObj.AcquireWriterLock(2000);
+
+                            memoryBufferPool.Enqueue(new IntPtr(buffer));
+
+                            lockObj.ReleaseWriterLock();
                         }
 #if !_MEMMAP_
                 }
@@ -550,28 +599,11 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
 
                     });
                     copyTasks.Add(lz4Task);
-                    disposables.Add(copyDataArray);
+                    disposables.Add(texDataArray);
                     texIdx++;
 #endif
-                        }
-
-                /*
-                voxelTextures.Add(tex);
-                if (voxelTextures.Count > 32)
-                {
-                    voxelTextures.ForEach((tex1) =>
-                    {
-                        System.IO.File.WriteAllBytes(string.Format(LitShadowMapPath + "voxel_lv_{0}.png", texIdx), tex1.EncodeToPNG());
-                        //AssetDatabase.CreateAsset(tex1, string.Format(LitShadowMapPath + "voxel_lv_{0}.asset", texIdx));
-                        texIdx++;
-                        Resources.UnloadAsset(tex1);
-                    });
-                    voxelTextures.Clear();
-                    Resources.UnloadUnusedAssets();
-                    //AssetDatabase.AllowAutoRefresh();
-                    AssetDatabase.Refresh();
                 }
-                */
+                 
 #endif
 
             }
@@ -583,8 +615,21 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                 copyTasks.Clear();
                 streams.ForEach((stream) => stream.Dispose());
                 streams.Clear();
-                disposables.ForEach((dispose) => dispose.Dispose());
+                disposables.ForEach((dispose) => texDataArrayPool.Enqueue((NativeArray<byte>)dispose));
                 disposables.Clear();
+            }
+
+
+            while (texDataArrayPool.Count > 0)
+            {
+                try
+                { 
+                    texDataArrayPool.Dequeue().Dispose(); 
+                }
+                catch (System.InvalidOperationException e)
+                {
+
+                }
             }
 
 #if _MEMMAP_
@@ -619,13 +664,22 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
                 {
                     using (var copyFrom = voxelInfoMemory.CreateViewStream(0, totalCompressedSize + RootVoxelWidthSize * 8, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read))
                     {
-                        copyFrom.CopyTo(strippedMemMap.CreateViewStream(0, totalCompressedSize + RootVoxelWidthSize * 8));
+                        //copyFrom.CopyTo(strippedMemMap.CreateViewStream(0, totalCompressedSize + RootVoxelWidthSize * 8));
+                        var stream = strippedMemMap.CreateViewStream(0, totalCompressedSize + RootVoxelWidthSize * 8);
+                        var task = copyFrom.CopyToAsync(stream);
+                        while (!task.IsCompleted)
+                        {
+                            System.Threading.Thread.Sleep(30);
+                            UnityEditor.EditorUtility.DisplayProgressBar("", "copy memory map file", (float)stream.Position / stream.Length);
+                        }
                     }
+                    strippedMemMap.Dispose();
                 }
             }
 
             voxelInfoMemory.Dispose();
             System.IO.File.Delete(slicedFilePath + "/memoryMapping.data");
+            UnityEditor.EditorUtility.ClearProgressBar();
 #endif
             //AssetDatabase.DisallowAutoRefresh();
             /*
