@@ -52,15 +52,15 @@ Material:
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _Level1IndexMap:
-        m_Texture: {fileID: 2800000, guid: 3b34c4e2115d588468fe62253b6262d5, type: 2}
+        m_Texture: {fileID: 2800000, guid: 706ea365c548e0540a8c5a21e0a6f94b, type: 2}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _Level2LitShadowInfoArray:
-        m_Texture: {fileID: 18700000, guid: ef274550030a3dd46916d9261fd7283c, type: 2}
+        m_Texture: {fileID: 18700000, guid: 677c49d9403b274459f37d810bd25cd4, type: 2}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _Level4LitShadowInfoArray:
-        m_Texture: {fileID: 18700000, guid: f82c7415787a99a44a6d2367cbd21508, type: 2}
+        m_Texture: {fileID: 18700000, guid: 743f1762ab858bf45905d0055aee8017, type: 2}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _MainTex:
@@ -130,12 +130,12 @@ Material:
     - _UVSec: 0
     - _ZWrite: 1
     - _level1TexSize: 512
-    - _level2TexArrayDepth: 84
-    - _level4TexArrayDepth: 234
+    - _level2TexArrayDepth: 1
+    - _level4TexArrayDepth: 3
     m_Colors:
     - _Color: {r: 1, g: 1, b: 1, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
-    - _ProjSizeParams: {r: 250, g: 0.004, b: 500, a: 0.002}
-    - _VoxelParams: {r: 7.8125, g: 0.128, b: 64, a: 0.015625}
-    - _VoxelParamsLv2: {r: 3.90625, g: 0.256, b: 128, a: 0.0078125}
-    - _VoxelParamsLv3: {r: 1.953125, g: 0.512, b: 256, a: 0.00390625}
+    - _ProjSizeParams: {r: 2000, g: 0.0005, b: 4000, a: 0.00025}
+    - _VoxelParams: {r: 62.5, g: 0.016, b: 64, a: 0.015625}
+    - _VoxelParamsLv2: {r: 31.25, g: 0.032, b: 128, a: 0.0078125}
+    - _VoxelParamsLv3: {r: 15.625, g: 0.064, b: 256, a: 0.00390625}
