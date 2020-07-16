@@ -1975,6 +1975,12 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
         enc -= new Vector4(enc.y, enc.z, enc.w, enc.w) * kEncodeBit;
         return enc;
     }
+    public static float DecodeFloatRGBA(Vector4 enc)
+    {
+        Vector4 kDecodeDot = new Vector4(1.0f, 1 / 255.0f, 1 / 65025.0f, 1 / 16581375.0f);
+        return Vector4.Dot(enc, kDecodeDot);
+    }
+
     private Vector2 EncodeFloatRG(float v)
     {
         Vector2 kEncodeMul = new Vector2(1.0f, 255.0f);
@@ -1986,6 +1992,7 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
         enc.x -= enc.y * kEncodeBit;
         return enc;
     }
+
 
     private float DecodeFloatRG(Vector2 enc)
     {

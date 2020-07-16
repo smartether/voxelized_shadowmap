@@ -22,6 +22,22 @@ public class VxOnJobSystem : MonoBehaviour
             this.targetWidth = targetWidth;
             this.targetHeight = targetHeight;
         }
+
+        private void SetPixel(int x, int y, Color32 color)
+        {
+
+        }
+
+        private void SetByte(int x, int y, byte byteValue)
+        {
+
+        }
+
+        private void Set2Bit(int x, int y, bool highBit, bool lowBit)
+        {
+
+        }
+
         public void Execute(int index)
         {
             unsafe
@@ -39,6 +55,22 @@ public class VxOnJobSystem : MonoBehaviour
         {
             
         }
+
+        public static float DecodeFloatRGBA(Vector4 enc)
+        {
+            Vector4 kDecodeDot = new Vector4(1.0f, 1 / 255.0f, 1 / 65025.0f, 1 / 16581375.0f);
+            return Vector4.Dot(enc, kDecodeDot);
+        }
+
+        public static float Dot(Vector4 l, Vector4 r)
+        {
+            var lenL = Mathf.Sqrt(l.x * l.x + l.y * l.y + l.z * l.z + l.w * l.w);
+            var lenR = Mathf.Sqrt(r.x * r.x + r.y * r.y + r.z * r.z + l.w * l.w);
+            var cosRL = (l.x * r.x + l.y * r.y + l.z * r.z + l.w * r.w) / (lenR * lenL);
+            var dotValue1 = lenL * lenR * cosRL;
+            return dotValue1;
+        }
+
     }
 
     [ContextMenu("Test")]

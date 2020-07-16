@@ -184,4 +184,23 @@ public unsafe partial class ShadowmapBaker
             AssetDatabase.CreateAsset(tex, "Assets/decompressedTexs/tex_" + idx + ".asset");
         }
     }
+
+    [MenuItem("Tools/TestDot")]
+    public static void TestDot()
+    {
+        for(int i = 0; i < 64; i++)
+        {
+            var r = Vector4.Normalize(Matrix4x4.Rotate(Quaternion.Euler(6 * i, 2 * i, 15 * i)).MultiplyVector(Vector3.up));
+            var l = Vector4.Normalize(Matrix4x4.Rotate(Quaternion.Euler(1 * i, 3 * i, 5 * i)).MultiplyVector(Vector3.up));
+            r.w = i * 5;
+            l.w = i * 8;
+            var dotValue = Vector4.Dot(r, l);
+            var lenL = Mathf.Sqrt(l.x * l.x + l.y * l.y + l.z * l.z + l.w * l.w);
+            var lenR = Mathf.Sqrt(r.x * r.x + r.y * r.y + r.z * r.z + l.w * l.w);
+            var cosRL = (l.x * r.x + l.y * r.y + l.z * r.z + l.w * r.w) / (lenR * lenL);
+            var dotValue1 = lenL * lenR * cosRL;
+            Debug.Log(dotValue);
+            Debug.Log(dotValue1);
+        }
+    }
 }

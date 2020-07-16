@@ -6,6 +6,7 @@
 #define _LZ4_COMPRESS_
 #define _ENABLE_STRIP_
 #define _MEMMAP_
+//#define _CL_FROM_PRERENDER_TEX_
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -37,10 +38,14 @@ public unsafe partial class ShadowmapBaker
     // Cuda acclerate
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Init")]
     public static extern void Init(uint  targetBufferPoolSize, uint  originBufferPoolSize, uint  targetSize, uint scaler = 2, uint threadNum = 16);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ReleaseDepth2LitShadowProceduce")]
+    public static extern void ReleaseDepth2LitShadowProceduce();
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Close")]
     public static   extern new  void Close();
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Downsample")]
     public static extern int Downsample(void* targetTex, void* originTex, uint targetSize, uint scaler);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Downsample")]
+    public static extern int Depth2LitShadowMinBatch(byte* g_data, uint* g_dataSrc, float frontDepth, float backDepth, uint size, uint scaler);
 
     const string DLL_LZ4 = "liblz4.dll";
     //LZ4 compression
@@ -376,9 +381,20 @@ public unsafe partial class ShadowmapBaker
 
             }
 #else
-// compute from shadowmap
-    
+            // compute from shadowmap
+            Init(16, 16, (uint)lv4VoxelSize, (uint)shadowMap.width / (uint)lv4VoxelSize, 16);
+            var shadowMapDataArray = shadowmapTex.GetRawTextureData<Color32>();
+            var shadowMapDataPtr = shadowMapDataArray.GetUnsafeReadOnlyPtr();
+            for (int dVoxelIndex = 0, dVoxelMaxIndex = lv4VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
+            {
+                byte* blockPixels = null;
+                blockPixels = (byte*)mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)dVoxelIndex;
+                NativeArray<byte> voxelLitShadowInfoNA = new NativeArray<byte>(width * height, Allocator.Persistent);
+                byte* ptr = (byte*)voxelLitShadowInfoNA.GetUnsafePtr();
 
+                Depth2LitShadowMinBatch(blockPixels, (uint*)shadowMapDataPtr, 0, 1, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize));
+            }
+            ReleaseDepth2LitShadowProceduce();
 #endif
         }
         if (mPendingTask.Count > 0)
