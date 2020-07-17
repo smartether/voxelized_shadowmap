@@ -203,4 +203,28 @@ public unsafe partial class ShadowmapBaker
             Debug.Log(dotValue1);
         }
     }
+
+
+    [MenuItem("Tools/TestAlpha8")]
+    public static void TestAlpha8()
+    {
+        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(64, 64, 64, TextureFormat.Alpha8, false, true);
+        var na = new NativeArray<byte>(64 * 64 * 64, Allocator.Temp);
+        var subArray = na.GetSubArray(1024, 2048);
+        int maxDepth = litShadowInfoArrayLv2.depth;
+        var task = Task.Run(() =>
+        {
+            for (int i = 0, c = subArray.Length; i < c; i++)
+            {
+                subArray[i] = 128;
+            }
+            litShadowInfoArrayLv2.SetPixelData<byte>(na, 0, maxDepth - 1);
+        });
+        task.Wait();
+        AssetDatabase.CreateAsset(litShadowInfoArrayLv2, "Assets/TestSubArray.asset");
+
+    }
+
+
+
 }

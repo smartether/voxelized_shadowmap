@@ -30,6 +30,8 @@ public unsafe partial class ShadowmapBaker
     // 64Bit size memory allocate
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "AllocMem")]
     public static extern void* AllocMem(ulong size);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ReallocMem")]
+    public static extern void* ReallocMem(void* ptr, ulong size);
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "FreeMem")]
     public static extern void* FreeMem(void* ptr);
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GetSubArray")]
@@ -79,10 +81,12 @@ public unsafe partial class ShadowmapBaker
 
 
     // NativeArray不支持超过2G大小 并且 每个元素不可超过2MB
+    int initAllocSize = 1024 * 1024 * 128;
     byte* mLitShadowInfoArrayLv4Nalayout = null;
     //解压后的一张纹理
     int nLitShadowInfoLv4SliceBound = 0;
-    byte* mLitShadowInfoLv4Slice = null;
+    byte* mLitShadowInfoLv4SliceDst = null;
+    byte* mLitShadowInfoLv4SliceSrc = null;
     object mLockObj = new object();
     int mTaskProgress = 0;
     List<Task> mPendingTask = new List<Task>();
@@ -181,9 +185,10 @@ public unsafe partial class ShadowmapBaker
 
 
         ulong lv4VoxelSize64 = (ulong)lv4VoxelSize;
-        mLitShadowInfoArrayLv4Nalayout = (byte*)AllocMem(lv4VoxelSize64 * lv4VoxelSize64 * lv4VoxelSize64);
+        mLitShadowInfoArrayLv4Nalayout = (byte*)AllocMem((ulong)initAllocSize);// (byte*)AllocMem(lv4VoxelSize64 * lv4VoxelSize64 * lv4VoxelSize64);
         nLitShadowInfoLv4SliceBound = LZ4_compressBound((int)(lv4VoxelSize64 * lv4VoxelSize64));
-        mLitShadowInfoLv4Slice = (byte*)AllocMem((ulong)nLitShadowInfoLv4SliceBound);
+        mLitShadowInfoLv4SliceSrc = (byte*)AllocMem((ulong)lv4VoxelSize64 * lv4VoxelSize64);
+        mLitShadowInfoLv4SliceDst = (byte*)AllocMem((ulong)nLitShadowInfoLv4SliceBound);
         EditorUtility.DisplayProgressBar("Calculate", "Start alloc memory", 1.0f);
 
 
@@ -394,20 +399,57 @@ public unsafe partial class ShadowmapBaker
             var shadowMapDataPtr = shadowMapDataArray.GetUnsafeReadOnlyPtr();
             float worldLenghtPerLv4Voxel = (farClip - nearClip) / lv4VoxelSize;
             //worldLenghtPerLv4Voxel = (OrthoProjSize * 2) / lv4VoxelSize;
+
+            int headLen = lv4VoxelSize * 4;
+            //var voxelInfoMemory = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateOrOpen("VoxelInfoMapFile", 1024 * 1024 * 512, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
+            var headStream = new System.IO.UnmanagedMemoryStream(mLitShadowInfoArrayLv4Nalayout, headLen, initAllocSize, System.IO.FileAccess.ReadWrite); // voxelInfoMemory.CreateViewStream(0, lv4VoxelSize * 4, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
+            var bodyStream = new System.IO.UnmanagedMemoryStream(mLitShadowInfoArrayLv4Nalayout + headLen, initAllocSize - headLen, initAllocSize, System.IO.FileAccess.ReadWrite); //voxelInfoMemory.CreateViewStream(lv4VoxelSize * 4, 1024 * 1024 * 512 - lv4VoxelSize * 4, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.ReadWrite);
+            byte[] intBuff = new byte[4];
+            int compressedDataTotal = headLen;
             for (int dVoxelIndex = 0, dVoxelMaxIndex = lv4VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
             {
                 UnityEditor.EditorUtility.DisplayProgressBar("Calculating", "Converting depth to litShadow map on cuda", dVoxelIndex / (float)dVoxelMaxIndex);
-                byte* blockPixels = null;
-                blockPixels = (byte*)mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)dVoxelIndex;
-                var compressedSize = LZ4_compress_fast(blockPixels + 4, mLitShadowInfoLv4Slice, voxelAreaLv4, nLitShadowInfoLv4SliceBound, 0);
-                uint* blockHeadPtr = (uint*)blockPixels;
-                blockHeadPtr[0] = compressedSize;
-                // NativeArray<byte> voxelLitShadowInfoNA = new NativeArray<byte>(width * height, Allocator.Persistent);
-                // byte* ptr = (byte*)voxelLitShadowInfoNA.GetUnsafePtr();
+                //byte* blockPixels = null;
+                //blockPixels = (byte*)mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)dVoxelIndex;
+
                 float _miniPlane = 1.0f - (dVoxelIndex + 1) * worldLenghtPerLv4Voxel / (farClip - nearClip); // (i + 1) * VoxelSize;// 
                 float _maxPlane = 1.0f - dVoxelIndex * worldLenghtPerLv4Voxel / (farClip - nearClip); //  i * VoxelSize;//
-                Depth2LitShadowMinBatch(blockPixels, (uint*)shadowMapDataPtr, _maxPlane, _miniPlane, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize), true);
+                Depth2LitShadowMinBatch(mLitShadowInfoLv4SliceSrc, (uint*)shadowMapDataPtr, _maxPlane, _miniPlane, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize), true);
+                var compressedSize = LZ4_compress_fast(mLitShadowInfoLv4SliceSrc, mLitShadowInfoLv4SliceDst, voxelAreaLv4, nLitShadowInfoLv4SliceBound, 0);
+                intBuff[0] = ((byte*)&compressedDataTotal)[0];
+                intBuff[1] = ((byte*)&compressedDataTotal)[1];
+                intBuff[2] = ((byte*)&compressedDataTotal)[2];
+                intBuff[3] = ((byte*)&compressedDataTotal)[3];
+                headStream.Write(intBuff, 0, 4);
+
+
+                compressedDataTotal += compressedSize + 4;
+                if(compressedDataTotal >= initAllocSize)
+                {
+                    initAllocSize = initAllocSize + 1024 * 1024 * 16;
+                    mLitShadowInfoArrayLv4Nalayout = (byte*)ReallocMem(mLitShadowInfoArrayLv4Nalayout, (ulong)(initAllocSize));
+                    long headPos = headStream.Position;
+                    long bodyPos = bodyStream.Position;
+                    headStream = new System.IO.UnmanagedMemoryStream(mLitShadowInfoArrayLv4Nalayout, headLen, initAllocSize, System.IO.FileAccess.ReadWrite);
+                    bodyStream = new System.IO.UnmanagedMemoryStream(mLitShadowInfoArrayLv4Nalayout + headLen, initAllocSize - headLen, initAllocSize, System.IO.FileAccess.ReadWrite);
+                    headStream.Position = headPos;
+                    bodyStream.Position = bodyPos;
+
+                }
+                intBuff[0] = ((byte*)&compressedSize)[0];
+                intBuff[1] = ((byte*)&compressedSize)[1];
+                intBuff[2] = ((byte*)&compressedSize)[2];
+                intBuff[3] = ((byte*)&compressedSize)[3];
+                bodyStream.Write(intBuff, 0, 4);
+                using (var compressedStream = new System.IO.UnmanagedMemoryStream(mLitShadowInfoLv4SliceDst, compressedSize))
+                {
+                    compressedStream.CopyTo(bodyStream);
+                }
+                //uint* blockHeadPtr = (uint*)blockPixels;
+                //blockHeadPtr[0] = compressedSize;
             }
+            headStream.Dispose();
+            bodyStream.Dispose();
             ReleaseDepth2LitShadowProceduce();
 #endif
         }
@@ -429,10 +471,11 @@ public unsafe partial class ShadowmapBaker
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
-        
 
-        
-        DownSample(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (byte*)mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize / lv3VoxelSize);
+
+
+        DownSampleStream(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize / lv3VoxelSize);
+        //DownSample(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (byte*)mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize / lv3VoxelSize);
         for (int depth = 0, maxDepth = litShadowInfoArrayLv3.depth; depth < maxDepth; depth++)
         {
             var subArray = litShadowInfoArrayLv3Na.GetSubArray(depth * voxelAreaLv3, voxelAreaLv3);
@@ -572,9 +615,10 @@ public unsafe partial class ShadowmapBaker
             litShadowInfoMapArrayLv4NaLstTotal.Add(litShadowInfoMapArrayLv4Na.GetSubArray(64 * 64 * i, 64 * 64));
         }
         List<System.IntPtr> litShadowInfoArrayLv4NaLstTotal = new List<System.IntPtr>();
+        int* compressOffsetPtr = (int*)mLitShadowInfoArrayLv4Nalayout;
         for (int i = 0; i < lv4VoxelSize; i++)
         {
-            litShadowInfoArrayLv4NaLstTotal.Add(new System.IntPtr(mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)i));
+            litShadowInfoArrayLv4NaLstTotal.Add(new System.IntPtr(mLitShadowInfoArrayLv4Nalayout + compressOffsetPtr[i]));
         }
         MultiCoreMemSetBlack(indexPixels);
         litShadowInfoIndexMap.SetPixels(indexPixels);
@@ -630,10 +674,22 @@ public unsafe partial class ShadowmapBaker
                 }
                 //endIntersectCountPerlayer = startIntersectCountPerlayerLv1 + lv1IntesectedPerlayer[dVoxelIndex];
                 var taskToGenLitShadowTex = Task.Run(() =>
-                {
+                { //litShadowInfoArrayLstLv4.Clear();
+                    
                     float[] lv3Infos = new float[4];
                     Color32[] colorLine = new Color32[2];
                     List<System.IntPtr> litShadowInfoArrayLstLv4 = new List<System.IntPtr>(8);
+                    for(int i = 0; i < 32; i++)
+                    {
+                        litShadowInfoArrayLstLv4.Add(new IntPtr(AllocMem((ulong)voxelAreaLv4)));
+                    }
+                    for (int lv4D = dVoxelIndexTmp * 2 * 2 * 8 + 0 * 8, lv4DepthMax = lv4D + 32; lv4D < lv4DepthMax; lv4D++)
+                    {
+                        var compressedDataPtr = (byte*)litShadowInfoArrayLv4NaLstTotal[lv4D].ToPointer();
+                        int compressedSize = ((int*)compressedDataPtr)[0];
+                        LZ4_decompress_safe(compressedDataPtr + 4, (byte*)litShadowInfoArrayLstLv4[lv4D % 32].ToPointer(), compressedSize, (int)voxelAreaLv4);
+                        //litShadowInfoArrayLstLv4.Add(litShadowInfoArrayLv4NaLstTotal[lv4D]); //(litShadowInfoArrayLv4Na.GetSubArray(voxelAreaLv4 * lv4D, voxelAreaLv4));
+                    }
                     int queryIdxLv1Tmp = startIntersectCountPerlayerLv1;
                     int texDepthLv1Tmp = queryIdxLv1Tmp / 32;
                     int queryIdxLv4Tmp = startIntersectCountPerlayerLv3;
@@ -739,11 +795,17 @@ public unsafe partial class ShadowmapBaker
                                                         {
                                                             if (Mathf.Abs(lv3Infos[axeId] - 0.5f) < 0.1)
                                                             {
-                                                                litShadowInfoArrayLstLv4.Clear();
+                                                                //litShadowInfoArrayLstLv4.Clear();
+                                                                /*
                                                                 for (int lv4D = dVoxelIndexTmp * 2 * 2 * 8 + axeId * 8, lv4DepthMax = lv4D + 8; lv4D < lv4DepthMax; lv4D++)
                                                                 {
-                                                                    litShadowInfoArrayLstLv4.Add(litShadowInfoArrayLv4NaLstTotal[lv4D]); //(litShadowInfoArrayLv4Na.GetSubArray(voxelAreaLv4 * lv4D, voxelAreaLv4));
+                                                                    var compressedDataPtr = (byte*)litShadowInfoArrayLv4NaLstTotal[lv4D].ToPointer();
+                                                                    int compressedSize = ((int*)compressedDataPtr)[0];
+                                                                    LZ4_decompress_safe(compressedDataPtr + 4, (byte*)litShadowInfoArrayLstLv4[lv4D % 8].ToPointer(), compressedSize, (int)voxelAreaLv4);
+                                                                    //litShadowInfoArrayLstLv4.Add(litShadowInfoArrayLv4NaLstTotal[lv4D]); //(litShadowInfoArrayLv4Na.GetSubArray(voxelAreaLv4 * lv4D, voxelAreaLv4));
                                                                 }
+                                                                */
+
                                                                 for (int vPixelIndexLv4 = 0, vPixelMaxLv4 = 8; vPixelIndexLv4 < vPixelMaxLv4; vPixelIndexLv4++)
                                                                 {
                                                                     colorLine[0] = new Color32(0,0,0,0);
@@ -753,7 +815,7 @@ public unsafe partial class ShadowmapBaker
                                                                         
                                                                         for (int dPixelIndexLv4 = 0, dPixelMaxLv4 = 8; dPixelIndexLv4 < dPixelMaxLv4; dPixelIndexLv4++)
                                                                         {
-                                                                            var litShadowInfoArrayLv4Sub = (byte*)litShadowInfoArrayLstLv4[dPixelIndexLv4].ToPointer();
+                                                                            var litShadowInfoArrayLv4Sub = (byte*)litShadowInfoArrayLstLv4[axeId * 8 + dPixelIndexLv4].ToPointer();
                                                                             int lv4V = vVoxelIndex * 2 * 2 * 8 + 2 * 8 * vPixelIndex + 8 * vPixelIndexLv3 + vPixelIndexLv4;
                                                                             int lv4U = uVoxelIndex * 2 * 2 * 8 + 2 * 8 * uPixelIndex + 8 * uPixelIndexLv3 + uPixelIndexLv4;
                                                                             //bool isLit = litShadowInfoArrayLv4Sub[lv4VoxelSize * vVoxelIndex * 2 * 2 * 8;
@@ -863,13 +925,18 @@ public unsafe partial class ShadowmapBaker
                         }   // End for uDir
                     }   // End for vDir
 
+                    litShadowInfoArrayLstLv4.ForEach((ptr) =>
+                    {
+                        FreeMem(ptr.ToPointer());
+                    });
+
                     IncreaseProgress();
                 }, mCancelAllTask.Token);// End Task
 
                 mPendingTask.Add(taskToGenLitShadowTex);
 
 
-                if (mPendingTask.Count > 8)
+                if (mPendingTask.Count > 4)
                 {
                     Task.WaitAll(mPendingTask.ToArray());
                     if (WaitPendingTask(rootVoxelSize, true, true, "Calculating", "Generating VoxelInfo Texture"))
@@ -1228,28 +1295,6 @@ public unsafe partial class ShadowmapBaker
 
     }
 
-    [MenuItem("Tools/TestAlpha8")]
-    public static void TestAlpha8()
-    {
-        Texture2DArray litShadowInfoArrayLv2 = new Texture2DArray(64, 64, 64, TextureFormat.Alpha8, false, true);
-        var na = new NativeArray<byte>(64 * 64 * 64, Allocator.Temp);
-        var subArray = na.GetSubArray(1024, 2048);
-        int maxDepth = litShadowInfoArrayLv2.depth;
-        var task = Task.Run(() =>
-        {
-            for (int i = 0, c = subArray.Length; i < c; i++)
-            {
-                subArray[i] = 128;
-            }
-            litShadowInfoArrayLv2.SetPixelData<byte>(na, 0, maxDepth - 1);
-        });
-        task.Wait();
-        AssetDatabase.CreateAsset(litShadowInfoArrayLv2, "Assets/TestSubArray.asset");
-
-    }
-
-
-
 
 
     public enum DownSampleOption
@@ -1420,6 +1465,162 @@ public unsafe partial class ShadowmapBaker
         return Sum;
     }
 
+
+    private unsafe int DownSampleStream(int targetVoxelSize, int originVoxelSize, byte* targetLitShadowInfoArray,
+         byte* originLitShadowInfoArray, int kernelSize = 2 /* 2 * 2 */)
+    {
+        ResetProgress();
+        UnityEngine.Assertions.Assert.AreEqual(originVoxelSize / targetVoxelSize, kernelSize, "## Downsample error, kernelSize is not valid.");
+        List<Task> pendingTask = new List<Task>();
+        List<Task> pendingTask1 = new List<Task>();
+        var mainThread = System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext();
+        long originAreaSize = (long)originVoxelSize * (long)originVoxelSize;
+        long targetAreaSize = (long)targetVoxelSize * (long)targetVoxelSize;
+        int taskProgress = 0;
+
+        int stepSize = 4;
+        List<IntPtr> decompressBuffer = new List<IntPtr>();
+        for(int i = 0; i < stepSize * kernelSize; i++)
+        {
+            byte* buffer = (byte*)AllocMem((ulong)originAreaSize);
+            decompressBuffer.Add(new IntPtr(buffer));
+        }
+        //var headStream = new System.IO.UnmanagedMemoryStream(targetLitShadowInfoArray, targetVoxelSize * 4, initAllocSize, System.IO.FileAccess.ReadWrite);
+        //var bodyStream = new System.IO.UnmanagedMemoryStream(targetLitShadowInfoArray +  targetVoxelSize * 4, int.MaxValue, int.MaxValue, System.IO.FileAccess.ReadWrite);
+        int* compressSizeHead = (int*)originLitShadowInfoArray;
+        
+        Init((uint)8, (uint)8 * (uint)kernelSize, (uint)targetVoxelSize, (uint)originVoxelSize / (uint)targetVoxelSize);
+        // summary to root
+        for (long dBlockIndex = 0, dBlockIdxMax = (long)targetVoxelSize; dBlockIndex < dBlockIdxMax; dBlockIndex++)
+        {
+            long dBlockIndexTmp = dBlockIndex;
+            byte* lv1BlockPixels = (byte*)targetLitShadowInfoArray + dBlockIndex * targetAreaSize;
+            List<System.IntPtr> subDepths = new List<System.IntPtr>();
+            List<NativeArray<byte>> downsampledTemp = new List<NativeArray<byte>>(8);
+            
+            for (int subDepthIdx = 0; subDepthIdx < kernelSize; subDepthIdx++)
+            {
+                int compressedOffset = compressSizeHead[kernelSize * dBlockIndex + subDepthIdx];
+                int compressedSize = ((int*)((byte*)compressSizeHead + compressedOffset))[0];
+                var decompressedPtr = (byte*)decompressBuffer[(int)((dBlockIndex % stepSize) * kernelSize + subDepthIdx)].ToPointer();
+                int decompressedSize = LZ4_decompress_safe((byte*)compressSizeHead + compressedOffset + 4, decompressedPtr, compressedSize, (int)originAreaSize);
+                UnityEngine.Assertions.Assert.AreEqual(decompressedSize, originAreaSize, "decompressing failed...");
+
+                subDepths.Add(new IntPtr(decompressedPtr));
+                downsampledTemp.Add(new NativeArray<byte>(targetVoxelSize * targetVoxelSize, Allocator.Persistent));
+                //subDepths.Add(originLitShadowInfoArray.Slice<byte>((kernelSize * dBlockIndex + subDepthIdx) * originAreaSize, originAreaSize));
+            }
+
+            var task = Task.Run(() =>
+            {
+#if _ENABLE_CUDA
+                for (int subDepth = 0, subDepthMax = subDepths.Count; subDepth < subDepthMax; subDepth++)
+                {
+                    void* subTex = subDepths[subDepth].ToPointer();
+                    void* targetTex = downsampledTemp[subDepth].GetUnsafePtr();
+                    Downsample(targetTex, subTex, (uint)targetVoxelSize, (uint)kernelSize);
+                }
+
+                for (int vBlockIndex = 0, vBlockIdxMax = targetVoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
+                {
+                    for (int uBlockIndex = 0, uBlockIdxMax = targetVoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
+                    {
+                        bool isAllDepthWhite = true;
+                        bool isAllDepthBlack = true;
+                        for (int subDepth = 0, subDepthMax = subDepths.Count; subDepth < subDepthMax; subDepth++)
+                        {
+                            var pData = (byte*)downsampledTemp[subDepth].GetUnsafeReadOnlyPtr();
+                            isAllDepthWhite &= Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f - 1) < 0.1f;
+                            isAllDepthBlack &= Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f) < 0.1f;
+                        }
+
+                        // isAllDepthWhite &= downsampledTemp.TrueForAll((b) =>
+                        //{
+                        //    var pData = (byte*)b.GetUnsafeReadOnlyPtr();
+                        //    return Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f - 1) < 0.1f;
+                        //});
+                        //isAllDepthBlack &= downsampledTemp.TrueForAll((b) =>
+                        //{
+                        //    var pData = (byte*)b.GetUnsafeReadOnlyPtr();
+                        //    return Mathf.Abs(pData[(long)vBlockIndex * (long)targetVoxelSize + (long)uBlockIndex] / 255.0f) < 0.1f;
+                        //});
+
+                        bool isBlockIntersection = !isAllDepthWhite && !isAllDepthBlack;
+                        var blockResult = (isAllDepthWhite ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
+                        lv1BlockPixels[(long)vBlockIndex * (long)uBlockIdxMax + (long)uBlockIndex] = (byte)Mathf.RoundToInt(blockResult * 255);
+                    }
+                }
+
+                downsampledTemp.ForEach((temp) =>
+                {
+                    temp.Dispose();
+                });
+
+#else
+
+                for (int vBlockIndex = 0, vBlockIdxMax = targetVoxelSize; vBlockIndex < vBlockIdxMax; vBlockIndex++)
+                {
+                    for (int uBlockIndex = 0, uBlockIdxMax = targetVoxelSize; uBlockIndex < uBlockIdxMax; uBlockIndex++)
+                    {
+                        int uPixelBase = kernelSize * uBlockIndex;
+                        int vPixelBase = kernelSize * vBlockIndex;
+                        // voxel : 2*2*2 lv3
+                        bool isAllDepthWhite = true;
+                        bool isAllDepthBlack = true;
+                        for (int vPixelSub = 0, vPixelMax = kernelSize; vPixelSub < vPixelMax; vPixelSub++)
+                        {
+                            for (int uPixelSub = 0, uPixelMax = kernelSize; uPixelSub < uPixelMax; uPixelSub++)
+                            {
+                                int vPixel = vPixelBase + vPixelSub;
+                                int uPixel = uPixelBase + uPixelSub;
+
+                                isAllDepthWhite &= subDepths.TrueForAll((b) =>
+                                {
+                                    var pData = (byte*)b.ToPointer();
+                                    return Mathf.Abs(pData[(long)vPixel * (long)originVoxelSize + (long)uPixel] / 255.0f - 1) < 0.1f;
+                                });
+                                isAllDepthBlack &= subDepths.TrueForAll((b) =>
+                                {
+                                    var pData = (byte*)b.ToPointer();
+                                    return Mathf.Abs(pData[(long)vPixel * (long)originVoxelSize + (long)uPixel] / 255.0f) < 0.1f;
+                                });
+                            }
+                        }
+                        bool isBlockIntersection = !isAllDepthWhite && !isAllDepthBlack;
+                        var blockResult = (isAllDepthWhite ? 1 : 0) + (isBlockIntersection ? 0.5f : 0);
+                        lv1BlockPixels[(long)vBlockIndex * (long)uBlockIdxMax + (long)uBlockIndex] = (byte)Mathf.RoundToInt(blockResult * 255);
+                    }
+                }
+#endif
+                IncreaseProgress();
+            }, mCancelAllTask.Token);
+            //var task1 = new Task(() =>
+            //{
+            //    targetLitShadowInfoArray.(lv1BlockPixels, dBlockIndexTmp, 0);
+            //});
+
+            pendingTask.Add(task);
+            if (pendingTask.Count >= stepSize)
+            {
+                WaitPendingTask(targetVoxelSize, true, false, "Calculating", "DownSample from" + originVoxelSize + " to " + targetVoxelSize, pendingTask);
+                pendingTask.Clear();
+            }
+            //pendingTask1.Add(task1);
+
+        }
+
+        WaitPendingTask(targetVoxelSize, true, false, "Calculating", "DownSample from" + originVoxelSize + " to " + targetVoxelSize, pendingTask);
+        Close();
+        decompressBuffer.ForEach((ptr) =>
+        {
+            FreeMem(ptr.ToPointer());
+        });
+        Resources.UnloadUnusedAssets();
+        System.GC.Collect();
+        return 0;
+    }
+
+
     private unsafe int DownSample(int targetVoxelSize, int originVoxelSize, byte* targetLitShadowInfoArray,
          byte* originLitShadowInfoArray, int kernelSize = 2 /* 2 * 2 */)
     {
@@ -1437,10 +1638,7 @@ public unsafe partial class ShadowmapBaker
         for (long dBlockIndex = 0, dBlockIdxMax = (long)targetVoxelSize; dBlockIndex < dBlockIdxMax; dBlockIndex++)
         {
             long dBlockIndexTmp = dBlockIndex;
-            //var lv1BlockPixels = targetLitShadowInfoArray.GetSubArray(dBlockIndex * targetAreaSize, targetAreaSize);
             byte* lv1BlockPixels = (byte*)targetLitShadowInfoArray + dBlockIndex * targetAreaSize;
-            //var lv2BlockPixelsFront = originLitShadowInfoArray.Slice(dBlockIndex * areaSize); //.GetPixels(kernelSize * dBlockIndex);
-            //var lv2BlockPixelsBack = originLitShadowInfoArray.GetPixels(kernelSize * dBlockIndex + 1);
             List<System.IntPtr> subDepths = new List<System.IntPtr>();
             List<NativeArray<byte>> downsampledTemp = new List<NativeArray<byte>>(8);
             for (int subDepthIdx = 0; subDepthIdx < kernelSize; subDepthIdx++)
