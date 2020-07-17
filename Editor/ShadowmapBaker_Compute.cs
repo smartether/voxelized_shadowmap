@@ -609,7 +609,7 @@ public unsafe partial class ShadowmapBaker
         var indexPixelsNoTexArrayPixels = litShadowInfoIndexMapNoTextureArray.GetPixels(0);
 
         // init after get a accurate size
-        NativeArray<Color32> litShadowInfoMapArrayLv4Na = new NativeArray<Color32>(64 * 64 * lv4TextureArraySize, Allocator.Temp);
+        NativeArray<Color32> litShadowInfoMapArrayLv4Na = new NativeArray<Color32>(64 * 64 * lv4TextureArraySize, Allocator.Persistent);
         List<NativeArray<Color32>> litShadowInfoMapArrayLv4NaLstTotal = new List<NativeArray<Color32>>(lv4TextureArraySize);
         for(int i = 0; i < lv4TextureArraySize; i++) {
             litShadowInfoMapArrayLv4NaLstTotal.Add(litShadowInfoMapArrayLv4Na.GetSubArray(64 * 64 * i, 64 * 64));
@@ -1188,6 +1188,7 @@ public unsafe partial class ShadowmapBaker
         litShadowInfoArrayLv2Na.Dispose();
         litShadowInfoArrayLv3Na.Dispose();
 
+        litShadowInfoMapArrayLv4Na.Dispose();
 
         //AssetDatabase.DeleteAsset("Assets/litShadowInfoArray.asset");
 
