@@ -44,8 +44,8 @@ public unsafe partial class ShadowmapBaker
     public static   extern new  void Close();
     [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Downsample")]
     public static extern int Downsample(void* targetTex, void* originTex, uint targetSize, uint scaler);
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Downsample")]
-    public static extern int Depth2LitShadowMinBatch(byte* g_data, uint* g_dataSrc, float frontDepth, float backDepth, uint size, uint scaler);
+    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl, EntryPoint = "Depth2LitShadowMinBatch")]
+    public static extern int Depth2LitShadowMinBatch(byte* g_data, uint* g_dataSrc, float frontDepth, float backDepth, uint size, uint scaler, bool perferShadow);
 
     const string DLL_LZ4 = "liblz4.dll";
     //LZ4 compression
@@ -80,6 +80,9 @@ public unsafe partial class ShadowmapBaker
 
     // NativeArray不支持超过2G大小 并且 每个元素不可超过2MB
     byte* mLitShadowInfoArrayLv4Nalayout = null;
+    //解压后的一张纹理
+    int nLitShadowInfoLv4SliceBound = 0;
+    byte* mLitShadowInfoLv4Slice = null;
     object mLockObj = new object();
     int mTaskProgress = 0;
     List<Task> mPendingTask = new List<Task>();
@@ -179,6 +182,8 @@ public unsafe partial class ShadowmapBaker
 
         ulong lv4VoxelSize64 = (ulong)lv4VoxelSize;
         mLitShadowInfoArrayLv4Nalayout = (byte*)AllocMem(lv4VoxelSize64 * lv4VoxelSize64 * lv4VoxelSize64);
+        nLitShadowInfoLv4SliceBound = LZ4_compressBound((int)(lv4VoxelSize64 * lv4VoxelSize64));
+        mLitShadowInfoLv4Slice = (byte*)AllocMem((ulong)nLitShadowInfoLv4SliceBound);
         EditorUtility.DisplayProgressBar("Calculate", "Start alloc memory", 1.0f);
 
 
@@ -187,9 +192,11 @@ public unsafe partial class ShadowmapBaker
         var litShadowInfoArrayLv1Na = new NativeArray<byte>(rootVoxelSize * rootVoxelSize * rootVoxelSize, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 
         List<Object> resourceToRelease = new List<Object>();
+
+#if _CL_FROM_PRERENDER_TEX_
         var fileInfo = new System.IO.FileInfo(slicedFilePath + "/memoryMappingStripped.data");
         var voxelInfoMemory = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateFromFile(slicedFilePath + "/memoryMappingStripped.data", System.IO.FileMode.Open, "VoxelInfoMapFile", fileInfo.Length, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
-        
+#endif
         unsafe
         {
             //Texture2D alphaTex =new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.Alpha8, false, true);
@@ -382,17 +389,24 @@ public unsafe partial class ShadowmapBaker
             }
 #else
             // compute from shadowmap
-            Init(16, 16, (uint)lv4VoxelSize, (uint)shadowMap.width / (uint)lv4VoxelSize, 16);
+            Init(2, 16, (uint)lv4VoxelSize, (uint)shadowMap.width / (uint)lv4VoxelSize, 16);
             var shadowMapDataArray = shadowmapTex.GetRawTextureData<Color32>();
             var shadowMapDataPtr = shadowMapDataArray.GetUnsafeReadOnlyPtr();
+            float worldLenghtPerLv4Voxel = (farClip - nearClip) / lv4VoxelSize;
+            //worldLenghtPerLv4Voxel = (OrthoProjSize * 2) / lv4VoxelSize;
             for (int dVoxelIndex = 0, dVoxelMaxIndex = lv4VoxelSize; dVoxelIndex < dVoxelMaxIndex; dVoxelIndex++)
             {
+                UnityEditor.EditorUtility.DisplayProgressBar("Calculating", "Converting depth to litShadow map on cuda", dVoxelIndex / (float)dVoxelMaxIndex);
                 byte* blockPixels = null;
                 blockPixels = (byte*)mLitShadowInfoArrayLv4Nalayout + (long)voxelAreaLv4 * (long)dVoxelIndex;
-                NativeArray<byte> voxelLitShadowInfoNA = new NativeArray<byte>(width * height, Allocator.Persistent);
-                byte* ptr = (byte*)voxelLitShadowInfoNA.GetUnsafePtr();
-
-                Depth2LitShadowMinBatch(blockPixels, (uint*)shadowMapDataPtr, 0, 1, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize));
+                var compressedSize = LZ4_compress_fast(blockPixels + 4, mLitShadowInfoLv4Slice, voxelAreaLv4, nLitShadowInfoLv4SliceBound, 0);
+                uint* blockHeadPtr = (uint*)blockPixels;
+                blockHeadPtr[0] = compressedSize;
+                // NativeArray<byte> voxelLitShadowInfoNA = new NativeArray<byte>(width * height, Allocator.Persistent);
+                // byte* ptr = (byte*)voxelLitShadowInfoNA.GetUnsafePtr();
+                float _miniPlane = 1.0f - (dVoxelIndex + 1) * worldLenghtPerLv4Voxel / (farClip - nearClip); // (i + 1) * VoxelSize;// 
+                float _maxPlane = 1.0f - dVoxelIndex * worldLenghtPerLv4Voxel / (farClip - nearClip); //  i * VoxelSize;//
+                Depth2LitShadowMinBatch(blockPixels, (uint*)shadowMapDataPtr, _maxPlane, _miniPlane, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize), true);
             }
             ReleaseDepth2LitShadowProceduce();
 #endif
@@ -408,7 +422,9 @@ public unsafe partial class ShadowmapBaker
         }
         Close();
         ResetProgress();
+        #if _CL_FROM_PRERENDER_TEX_
         voxelInfoMemory.Dispose();
+        #endif
 
         Resources.UnloadUnusedAssets();
         System.GC.Collect();

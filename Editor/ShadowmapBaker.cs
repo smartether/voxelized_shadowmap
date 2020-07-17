@@ -789,7 +789,7 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
             {
                 var activeTmp = RenderTexture.active;
                 RenderTexture.active = shadowMap;
-                Texture2D tex = new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.ARGB32, false, true);
+                Texture2D tex = new Texture2D(shadowMap.width, shadowMap.height, TextureFormat.RGBA32, false, true);
                 tex.ReadPixels(new Rect(0, 0, shadowMap.width, shadowMap.height), 0, 0);
                 tex.Apply();
                 RenderTexture.active = activeTmp;
