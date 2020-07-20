@@ -414,7 +414,7 @@ public unsafe partial class ShadowmapBaker
 
                 float _miniPlane = 1.0f - (dVoxelIndex + 1) * worldLenghtPerLv4Voxel / (farClip - nearClip); // (i + 1) * VoxelSize;// 
                 float _maxPlane = 1.0f - dVoxelIndex * worldLenghtPerLv4Voxel / (farClip - nearClip); //  i * VoxelSize;//
-                Depth2LitShadowMinBatch(mLitShadowInfoLv4SliceSrc, (uint*)shadowMapDataPtr, _maxPlane, _miniPlane, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize), true);
+                Depth2LitShadowMinBatch(mLitShadowInfoLv4SliceSrc, (uint*)shadowMapDataPtr, _maxPlane, _miniPlane, (uint)lv4VoxelSize, (uint)(width / lv4VoxelSize), false);
                 var compressedSize = LZ4_compress_fast(mLitShadowInfoLv4SliceSrc, mLitShadowInfoLv4SliceDst, voxelAreaLv4, nLitShadowInfoLv4SliceBound, 0);
                 intBuff[0] = ((byte*)&compressedDataTotal)[0];
                 intBuff[1] = ((byte*)&compressedDataTotal)[1];
