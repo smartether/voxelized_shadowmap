@@ -1,6 +1,10 @@
-﻿using System.Collections;
+﻿#define _LITINFO_NO_CACHE_
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using Unity.Collections;
+using Unity.Collections.LowLevel;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel;
 using F = System.Single;
@@ -9,15 +13,24 @@ public class VxOnJobSystem : MonoBehaviour
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     public struct CompressedLitInfo
     {
+        public static int currentCompressedLitInfoMaxVoxelId = 4096;
         // voxel above it are lit
         public System.UInt16 litEndVoxelId;
         // voxel following it are shadow
         public System.UInt16 shadowStartVoxelId;
+#if !_LITINFO_NO_CACHE_
         public byte flags;
         // align
         public byte flags1;
+#endif
         public bool IsAllIntersected
         {
+#if _LITINFO_NO_CACHE_
+            get
+            {
+                return shadowStartVoxelId >= currentCompressedLitInfoMaxVoxelId - 1 && shadowStartVoxelId <= 1;
+            }
+#else
             get
             {
                 return (flags & (1 << 7 ))!= 0;
@@ -32,9 +45,16 @@ public class VxOnJobSystem : MonoBehaviour
                         flags &= (byte)(~((byte)1 << 7));
                 }
             }
+#endif
         }
-        public bool IsAllLit 
-        { 
+        public bool IsAllLit
+        {
+#if _LITINFO_NO_CACHE_
+            get
+            {
+                return litEndVoxelId >= currentCompressedLitInfoMaxVoxelId - 1;
+            }
+#else
             get
             {
                 return (flags & (1 << 6)) != 0;
@@ -49,7 +69,34 @@ public class VxOnJobSystem : MonoBehaviour
                         flags &= (byte)(~((byte)1 << 6));
                 }
             }
+#endif
         }
+
+        public bool IsAllShadow
+        {
+#if _LITINFO_NO_CACHE_
+            get
+            {
+                return shadowStartVoxelId <= 1;
+            }
+#else
+            get
+            {
+                return (flags & (1 << 5)) != 0;
+            }
+            set
+            {
+                unchecked
+                {
+                    if (value)
+                        flags |= (byte)((byte)1 << 5);
+                    else
+                        flags &= (byte)(~((byte)1 << 5));
+                }
+            }
+#endif
+        }
+
     }
 
     public unsafe struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch
@@ -64,6 +111,8 @@ public class VxOnJobSystem : MonoBehaviour
         System.Int64 _dstAddr;
         int maxVoxel;
 
+        int progress;
+
         public AccelerationJob(long srcAddr, long dstAddr, int originWidth, int originHeight, int targetWidth, int targetHeight, int scaler, F depthPerVoxel = 1 / 2048.0f, int maxVoxel = 1024)
         {
             _srcAddr = srcAddr;
@@ -72,9 +121,10 @@ public class VxOnJobSystem : MonoBehaviour
             this.originHeight = originHeight;
             this.targetWidth = targetWidth;
             this.targetHeight = targetHeight;
-            this.depthPerVoxel = 1 / 2048.0f;
+            this.depthPerVoxel = depthPerVoxel; 
             this.scaler = scaler;
             this.maxVoxel = maxVoxel;
+            progress = 0;
         }
 
         private void SetPixel(int x, int y, Color32 color)
@@ -92,6 +142,7 @@ public class VxOnJobSystem : MonoBehaviour
 
         }
 
+        [Unity.Burst.BurstCompile]
         public void Execute(int index)
         {
             unsafe
@@ -125,7 +176,7 @@ public class VxOnJobSystem : MonoBehaviour
                 bool isAllLit = true;
                 bool isAllIntersected = true;
 
-                // assume shadow voxel start
+                // find out shadow voxel start
                 F shadowPlaneFrontDepth = depthMin - depthMin % depthPerVoxel;
                 F shadowPlaneBackDepth = shadowPlaneFrontDepth - depthPerVoxel;
                 
@@ -133,6 +184,7 @@ public class VxOnJobSystem : MonoBehaviour
                 int shadowStartDepth = Mathf.RoundToInt((1 - shadowPlaneFrontDepth) / depthPerVoxel);
                 for (; shadowStartDepth < maxVoxel; shadowStartDepth++)
                 {
+                    isAllShadow = true;
                     for (int v = 0; v < 2; v++)
                     {
                         for (int u = 0; u < 2; u++)
@@ -145,7 +197,9 @@ public class VxOnJobSystem : MonoBehaviour
                             isAllShadow &= depth > shadowPlaneFrontDepth;
                         }
                     }
-                    shadowPlaneFrontDepth += depthPerVoxel;
+                    if (isAllShadow)
+                        break;
+                    shadowPlaneFrontDepth -= depthPerVoxel;
                 }
                 if (isAllShadow)
                 {
@@ -156,6 +210,52 @@ public class VxOnJobSystem : MonoBehaviour
 
                 F litPlaneFrontDepth = depthMax - depthMax % depthPerVoxel;
                 F litPlaneBackDepth = litPlaneFrontDepth - depthPerVoxel;
+                int litEndDepth = Mathf.RoundToInt((1 - litPlaneFrontDepth) / depthPerVoxel);
+                for(;litEndDepth > -1; litEndDepth--)
+                { 
+                    isAllLit = true;
+                    for (int v = 0; v < 2; v++)
+                    {
+                        for (int u = 0; u < 2; u++)
+                        {
+                            int srcY = scaler * dstY + v;
+                            int srcX = scaler * dstX + u;
+                            int srcIndex = srcY * originWidth + srcX;
+                            Color32 encodedDepth = srcPtr[srcIndex];
+                            F depth = DecodeFloatRGBA(new Vector4(encodedDepth.r, encodedDepth.g, encodedDepth.b, encodedDepth.a));
+                            isAllLit &= depth < litPlaneBackDepth;
+                        }
+                    }
+                    if (isAllLit)
+                        break;
+                    litPlaneBackDepth += depthPerVoxel;
+                }
+                if (isAllLit)
+                {
+                    dstPtr[index].litEndVoxelId = (ushort)Mathf.Clamp(litEndDepth, 0, maxVoxel);
+                }
+
+
+                /*
+                if (shadowStartDepth <= 1)
+                {
+                    dstPtr[index].IsAllLit = false;
+                    dstPtr[index].IsAllShadow = true;
+                    dstPtr[index].IsAllIntersected = false;
+                }
+                if(litEndDepth >= maxVoxel - 1)
+                {
+                    dstPtr[index].IsAllLit = true;
+                    dstPtr[index].IsAllShadow = false;
+                    dstPtr[index].IsAllIntersected = false;
+                }
+                if (shadowStartDepth >= maxVoxel - 1 && litEndDepth <= 1)
+                {
+                    dstPtr[index].IsAllLit = false;
+                    dstPtr[index].IsAllShadow = false;
+                    dstPtr[index].IsAllIntersected = true;
+                }
+                */
             }
 
         }
@@ -182,11 +282,28 @@ public class VxOnJobSystem : MonoBehaviour
 
     }
 
-    [ContextMenu("Test")]
-    public void Test()
+#if UNITY_EDITOR
+    [UnityEditor.MenuItem("Tools/RunVxOnJobSystem")]
+    public static unsafe void Test()
     {
-        long srcAddr = System.Runtime.InteropServices.Marshal.AllocHGlobal(1024).ToInt64();
-        long dstAddr = System.Runtime.InteropServices.Marshal.AllocHGlobal(1024).ToInt64();
+        Texture2D shadowmap = UnityEditor.Selection.activeObject as Texture2D;
+        var shadowmapData = shadowmap.GetRawTextureData<Color32>();
+        NativeArray<Color32> targetData = new NativeArray<Color32>(4096 * 4096 * sizeof(CompressedLitInfo), Allocator.Temp);
+        long srcAddr = new System.IntPtr(shadowmapData.GetUnsafePtr()).ToInt64();
+        long dstAddr = new System.IntPtr(targetData.GetUnsafePtr()).ToInt64();
+
+        AccelerationJob job = new AccelerationJob(srcAddr, dstAddr,
+            8192, 8192,
+            4096, 4096,
+            2, 1 / 4096f,
+            4095);
+        job.Run(4096 * 4096);
+
+        Texture2D texLitInfo = new Texture2D(4096, 4096, TextureFormat.RGBA32, false, true);
+        texLitInfo.SetPixelData<Color32>( targetData, 0);
+        texLitInfo.Apply(false, false);
+        UnityEditor.AssetDatabase.CreateAsset(texLitInfo, "Assets/texLitInfo.asset");
+        /*
         unsafe
         {
             byte* src = (byte*)new System.IntPtr(srcAddr).ToPointer();
@@ -204,7 +321,9 @@ public class VxOnJobSystem : MonoBehaviour
                 Debug.Log(dst[i]);
             }
         }
+        */
     }
+#endif
 
     // Start is called before the first frame update
     void Start()

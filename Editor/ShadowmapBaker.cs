@@ -208,6 +208,14 @@ public partial class ShadowmapBaker : UnityEditor.EditorWindow
         EditorPrefs.SetBool("Sdmbk:bExportLvLitShadowInfoTexArray4Dbg_" + SceneManager.GetActiveScene().name, bExportLvLitShadowInfoTexArray4Dbg);
         bSetTopIntersectedVoxelLit = EditorGUILayout.Toggle("SetTopIntersectedVoxelLit", EditorPrefs.GetBool("Sdmbk:bSetTopIntersectedVoxelLit_" + SceneManager.GetActiveScene().name, bSetTopIntersectedVoxelLit));
         EditorPrefs.SetBool("Sdmbk:bSetTopIntersectedVoxelLit_" + SceneManager.GetActiveScene().name, bSetTopIntersectedVoxelLit);
+        if (GUILayout.Button("Precompute voxel depth Ultra") && lastClickTime != DateTime.Now.Second)
+        {
+            if (UnityEditor.EditorUtility.DisplayDialog("precompute", "will precompute?", "ok", "cancel"))
+            {
+                precomputeVoxelDepthUltra();
+            }
+            lastClickTime = DateTime.Now.Second;
+        }
         if (GUILayout.Button("Precompute voxel depth") && lastClickTime != DateTime.Now.Second)
         {
             if (UnityEditor.EditorUtility.DisplayDialog("precompute", "will precompute?", "ok", "cancel"))
