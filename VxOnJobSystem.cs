@@ -23,6 +23,11 @@ public class VxOnJobSystem : MonoBehaviour
         // align
         public byte flags1;
 #endif
+        public bool IsSpecial
+        {
+            get { return IsAllIntersected || IsAllLit || IsAllShadow; }
+        } 
+        // all voxel on axsi is intersected
         public bool IsAllIntersected
         {
 #if _LITINFO_NO_CACHE_
@@ -47,6 +52,7 @@ public class VxOnJobSystem : MonoBehaviour
             }
 #endif
         }
+        // all voxel on axsi is lit
         public bool IsAllLit
         {
 #if _LITINFO_NO_CACHE_
@@ -71,7 +77,7 @@ public class VxOnJobSystem : MonoBehaviour
             }
 #endif
         }
-
+        // all voxel on axsi is shadow 
         public bool IsAllShadow
         {
 #if _LITINFO_NO_CACHE_
