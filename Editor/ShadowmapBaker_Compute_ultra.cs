@@ -28,6 +28,55 @@ public unsafe partial class ShadowmapBaker
 {
     // compute voxel on cpu 
     // compute lv3 lit or shadow info first, then summary to lv2 and rootLv1
+
+
+    private int SumInfoUltra(int size, Texture2DArray litShadowInfoArray, DownSampleOption downsampleOption = DownSampleOption.None, int[] sumPerLayer = null)
+    {
+        if (sumPerLayer != null)
+        {
+            UnityEngine.Assertions.Assert.AreEqual(sumPerLayer.Length, size, "$$ size of sumPerLayer should be equal to parm size");
+        }
+        int areaSize = size * size;
+        List<Task<int>> pendingTask = new List<Task<int>>();
+        for (int i = 0; i < size; i++)
+        {
+            int iTmp = i;
+            var subArrayPtr = litShadowInfoArray.GetPixels(i);
+            var task = Task.Run<int>(() =>
+            {
+                unsafe
+                {
+                    int sumSub = 0;
+                    for (int idx = 0; idx < areaSize; idx++)
+                    {
+                        bool prebool = false;
+                        prebool |= (DownSampleOption.SumTargetIntersectedCount == downsampleOption) && Mathf.Abs(subArrayPtr[idx].a - 0.5f) < 0.1;
+                        prebool |= (DownSampleOption.SumTargetLitCount == downsampleOption) && Mathf.Abs(subArrayPtr[idx].a - 1) < 0.1;
+                        prebool |= (DownSampleOption.SumTargetShadowedCount == downsampleOption) && subArrayPtr[idx].a < 0.1;
+                        if (prebool)
+                        {
+                            sumSub++;
+                        }
+                    }
+                    if(sumPerLayer != null)
+                    {
+                        sumPerLayer[iTmp] = sumSub;
+                    }
+                    return sumSub;
+                }
+            });
+
+        }
+        Task.WaitAll(pendingTask.ToArray());
+
+        int Sum = 0;
+        pendingTask.ForEach((t) =>
+        {
+            Sum += t.Result;
+        });
+        return Sum;
+    }
+
     unsafe void precomputeVoxelDepthUltra()
     {
         //renderMode = RenderMode.Shadowmap;
@@ -71,10 +120,10 @@ public unsafe partial class ShadowmapBaker
 
 
         ulong lv4VoxelSize64 = (ulong)lv4VoxelSize;
-        mLitShadowInfoArrayLv4Nalayout = (byte*)AllocMem((ulong)initAllocSize);// (byte*)AllocMem(lv4VoxelSize64 * lv4VoxelSize64 * lv4VoxelSize64);
-        nLitShadowInfoLv4SliceBound = LZ4_compressBound((int)(lv4VoxelSize64 * lv4VoxelSize64));
-        mLitShadowInfoLv4SliceSrc = (byte*)AllocMem((ulong)lv4VoxelSize64 * lv4VoxelSize64);
-        mLitShadowInfoLv4SliceDst = (byte*)AllocMem((ulong)nLitShadowInfoLv4SliceBound);
+        //mLitShadowInfoArrayLv4Nalayout = (byte*)AllocMem((ulong)initAllocSize);// (byte*)AllocMem(lv4VoxelSize64 * lv4VoxelSize64 * lv4VoxelSize64);
+        //nLitShadowInfoLv4SliceBound = LZ4_compressBound((int)(lv4VoxelSize64 * lv4VoxelSize64));
+        //mLitShadowInfoLv4SliceSrc = (byte*)AllocMem((ulong)lv4VoxelSize64 * lv4VoxelSize64);
+        //mLitShadowInfoLv4SliceDst = (byte*)AllocMem((ulong)nLitShadowInfoLv4SliceBound);
         EditorUtility.DisplayProgressBar("Calculate", "Start alloc memory", 1.0f);
 
 
@@ -362,7 +411,7 @@ public unsafe partial class ShadowmapBaker
 
         Texture2D shadowmap = UnityEditor.Selection.activeObject as Texture2D;
         var shadowmapData = shadowmap.GetRawTextureData<Color32>();
-        NativeArray<Color32> targetData = new NativeArray<Color32>(lv4VoxelSize * lv4VoxelSize * sizeof(VxOnJobSystem.CompressedLitInfo), Allocator.Temp);
+        NativeArray<Color32> targetData = new NativeArray<Color32>(lv4VoxelSize * lv4VoxelSize * sizeof(VxOnJobSystem.CompressedLitInfo), Allocator.Persistent);
         var lv4LitInfoArrayPtr = (VxOnJobSystem.CompressedLitInfo*)targetData.GetUnsafePtr();
         long srcAddr = new System.IntPtr(shadowmapData.GetUnsafePtr()).ToInt64();
         long dstAddr = new System.IntPtr(targetData.GetUnsafePtr()).ToInt64();
@@ -375,7 +424,8 @@ public unsafe partial class ShadowmapBaker
         job.Run(lv4VoxelSize * lv4VoxelSize);
 
 
-        DownSampleStreamUltra(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (VxOnJobSystem.CompressedLitInfo*)targetData.GetUnsafePtr(), lv4VoxelSize / lv3VoxelSize);
+        DownSampleStreamUltra(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), 
+            (VxOnJobSystem.CompressedLitInfo*)targetData.GetUnsafePtr(), lv4VoxelSize / lv3VoxelSize);
         //DownSample(lv3VoxelSize, lv4VoxelSize, (byte*)litShadowInfoArrayLv3Na.GetUnsafePtr(), (byte*)mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize / lv3VoxelSize);
         for (int depth = 0, maxDepth = litShadowInfoArrayLv3.depth; depth < maxDepth; depth++)
         {
@@ -436,7 +486,7 @@ public unsafe partial class ShadowmapBaker
         //setTopVoxelLit(litShadowInfoArrayLv3);
         if (bSetTopIntersectedVoxelLit)
         {
-            setTopVoxelLit(mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize, lv4VoxelSize, lv4VoxelSize);
+            // setTopVoxelLit(mLitShadowInfoArrayLv4Nalayout, lv4VoxelSize, lv4VoxelSize, lv4VoxelSize);
         }
         //setTopVoxelLit(litShadowInfoArrayRoot);
 
@@ -515,12 +565,7 @@ public unsafe partial class ShadowmapBaker
         for(int i = 0; i < lv4TextureArraySize; i++) {
             litShadowInfoMapArrayLv4NaLstTotal.Add(litShadowInfoMapArrayLv4Na.GetSubArray(64 * 64 * i, 64 * 64));
         }
-        List<System.IntPtr> litShadowInfoArrayLv4NaLstTotal = new List<System.IntPtr>();
-        int* compressOffsetPtr = (int*)mLitShadowInfoArrayLv4Nalayout;
-        for (int i = 0; i < lv4VoxelSize; i++)
-        {
-            litShadowInfoArrayLv4NaLstTotal.Add(new System.IntPtr(mLitShadowInfoArrayLv4Nalayout + compressOffsetPtr[i]));
-        }
+        
         MultiCoreMemSetBlack(indexPixels);
         litShadowInfoIndexMap.SetPixels(indexPixels);
 
@@ -625,7 +670,7 @@ public unsafe partial class ShadowmapBaker
                                         Color backColor = lv2_back;
 
                                         if (((Mathf.Abs(frontColor.a - 1) < 0.1f && Mathf.Abs(backColor.a - 1) < 0.1f) ||
-                                            (Mathf.Abs(frontColor.a - 0) < 0.1f && Mathf.Abs(backColor.a - 0) < 0.1f)))
+                                             (Mathf.Abs(frontColor.a - 0) < 0.1f && Mathf.Abs(backColor.a - 0) < 0.1f)))
                                         {
 
                                             Color colorLv3 = new Color(frontColor.a, frontColor.a, frontColor.a, frontColor.a);
@@ -696,22 +741,17 @@ public unsafe partial class ShadowmapBaker
                                                                             int lv4V = vVoxelIndex * 2 * 2 * 8 + 2 * 8 * vPixelIndex + 8 * vPixelIndexLv3 + vPixelIndexLv4;
                                                                             int lv4U = uVoxelIndex * 2 * 2 * 8 + 2 * 8 * uPixelIndex + 8 * uPixelIndexLv3 + uPixelIndexLv4;
                                                                             int lv4D = dVoxelIndexTmp * 2 * 2 * 8 +
-                                                                                       2 * 8 * axeId +
-                                                                                       8 * dPixelIndexLv4 +
-                                                                                       dPixelIndexLv4;
-                                                                            int targetIndex = lv4D * voxelAreaLv4 +
-                                                                                              lv4V * lv4VoxelSize +
+                                                                                       8 * axeId + dPixelIndexLv4;
+                                                                            int targetIndex = lv4V * lv4VoxelSize +
                                                                                               lv4U;
                                                                             
                                                                             var lv4LitInfo = lv4LitInfoArrayPtr[targetIndex];
-
 
                                                                             bool isLit =
                                                                                 lv4LitInfo.IsAllLit ||
                                                                                 lv4LitInfo.litEndVoxelId >= lv4D;
                                                                             bool isShadow = lv4LitInfo.IsAllShadow ||
-                                                                                            lv4LitInfo
-                                                                                                .shadowStartVoxelId <=
+                                                                                            lv4LitInfo.shadowStartVoxelId <=
                                                                                             lv4D;
                                                                             if (isShadow)
                                                                             {
@@ -1069,7 +1109,7 @@ public unsafe partial class ShadowmapBaker
         }
 #endif
 
-                var savePathAsset = EditorUtility.SaveFolderPanel("保存路径", Application.dataPath, "");
+        var savePathAsset = EditorUtility.SaveFolderPanel("保存路径", Application.dataPath, "");
         var parentPath = FileUtil.GetProjectRelativePath(savePathAsset);
 
         litShadowInfoArrayLv1Na.Dispose();
@@ -1077,6 +1117,7 @@ public unsafe partial class ShadowmapBaker
         litShadowInfoArrayLv3Na.Dispose();
 
         litShadowInfoMapArrayLv4Na.Dispose();
+        targetData.Dispose();
 
         //AssetDatabase.DeleteAsset("Assets/litShadowInfoArray.asset");
 
@@ -1093,7 +1134,6 @@ public unsafe partial class ShadowmapBaker
         AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
 
-        FreeMem(mLitShadowInfoArrayLv4Nalayout);
         System.GC.Collect();
 
         litShadowInfoMapArrayLv3.Apply(false, false);
@@ -1182,55 +1222,6 @@ public unsafe partial class ShadowmapBaker
         DestroyImmediate(go);
 
 
-    }
-
-
-
-    private int SumInfoUltra(int size, Texture2DArray litShadowInfoArray, DownSampleOption downsampleOption = DownSampleOption.None, int[] sumPerLayer = null)
-    {
-        if (sumPerLayer != null)
-        {
-            UnityEngine.Assertions.Assert.AreEqual(sumPerLayer.Length, size, "$$ size of sumPerLayer should be equal to parm size");
-        }
-        int areaSize = size * size;
-        List<Task<int>> pendingTask = new List<Task<int>>();
-        for (int i = 0; i < size; i++)
-        {
-            int iTmp = i;
-            var subArrayPtr = litShadowInfoArray.GetPixels(i);
-            var task = Task.Run<int>(() =>
-            {
-                unsafe
-                {
-                    int sumSub = 0;
-                    for (int idx = 0; idx < areaSize; idx++)
-                    {
-                        bool prebool = false;
-                        prebool |= (DownSampleOption.SumTargetIntersectedCount == downsampleOption) && Mathf.Abs(subArrayPtr[idx].a - 0.5f) < 0.1;
-                        prebool |= (DownSampleOption.SumTargetLitCount == downsampleOption) && Mathf.Abs(subArrayPtr[idx].a - 1) < 0.1;
-                        prebool |= (DownSampleOption.SumTargetShadowedCount == downsampleOption) && subArrayPtr[idx].a < 0.1;
-                        if (prebool)
-                        {
-                            sumSub++;
-                        }
-                    }
-                    if(sumPerLayer != null)
-                    {
-                        sumPerLayer[iTmp] = sumSub;
-                    }
-                    return sumSub;
-                }
-            });
-
-        }
-        Task.WaitAll(pendingTask.ToArray());
-
-        int Sum = 0;
-        pendingTask.ForEach((t) =>
-        {
-            Sum += t.Result;
-        });
-        return Sum;
     }
 
 
@@ -1361,7 +1352,7 @@ public unsafe partial class ShadowmapBaker
         long targetAreaSize = (long)targetVoxelSize * (long)targetVoxelSize;
         int taskProgress = 0;
 
-        int stepSize = 4;
+        int stepSize = 16;
         
         // summary to root
         for (long dBlockIndex = 0, dBlockIdxMax = (long)targetVoxelSize; dBlockIndex < dBlockIdxMax; dBlockIndex++)
@@ -1382,16 +1373,17 @@ public unsafe partial class ShadowmapBaker
                         bool isLayerAllLit = true;
                         bool isLayerAllShadow = true;
                         bool isLayerAllIntersected = true;
-                        for (int dPixelSub = 0, dPixelMax = kernelSize; dPixelSub < dPixelMax; dPixelSub++)
+
+                        for (int vPixelSub = 0, vPixelMax = kernelSize; vPixelSub < vPixelMax; vPixelSub++)
                         {
-                            for (int vPixelSub = 0, vPixelMax = kernelSize; vPixelSub < vPixelMax; vPixelSub++)
+                            for (int uPixelSub = 0, uPixelMax = kernelSize; uPixelSub < uPixelMax; uPixelSub++)
                             {
-                                for (int uPixelSub = 0, uPixelMax = kernelSize; uPixelSub < uPixelMax; uPixelSub++)
+                                for (int dPixelSub = 0, dPixelMax = kernelSize; dPixelSub < dPixelMax; dPixelSub++)
                                 {
                                     int dPixel = dPixelBase + dPixelSub;
                                     int vPixel = vPixelBase + vPixelSub;
                                     int uPixel = uPixelBase + uPixelSub;
-                                    int srcIndex = (int)originAreaSize * dPixel + vPixel * (int)originVoxelSize + uPixel;
+                                    int srcIndex = vPixel * (int) originVoxelSize + uPixel;
                                     var originLitShadowInfo = originLitShadowInfoArray[srcIndex];
                                     isLayerAllLit &= originLitShadowInfo.IsAllLit ||
                                                      originLitShadowInfo.litEndVoxelId >= dPixel;
@@ -1402,7 +1394,6 @@ public unsafe partial class ShadowmapBaker
                                         originLitShadowInfo.IsAllIntersected ||
                                         originLitShadowInfo.litEndVoxelId < dPixel &&
                                         originLitShadowInfo.shadowStartVoxelId > dPixel;
-
                                 }
                             }
                         }
@@ -1425,7 +1416,6 @@ public unsafe partial class ShadowmapBaker
         }
 
         WaitPendingTask(targetVoxelSize, true, false, "Calculating", "DownSample from" + originVoxelSize + " to " + targetVoxelSize, pendingTask);
-        Close();
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
         return 0;

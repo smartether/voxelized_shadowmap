@@ -7,6 +7,8 @@ using Unity.Collections.LowLevel;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel;
+using UnityEditor;
+using UnityEngine.UIElements;
 using F = System.Single;
 public class VxOnJobSystem : MonoBehaviour
 {
@@ -33,7 +35,7 @@ public class VxOnJobSystem : MonoBehaviour
 #if _LITINFO_NO_CACHE_
             get
             {
-                return shadowStartVoxelId >= currentCompressedLitInfoMaxVoxelId - 1 && shadowStartVoxelId <= 1;
+                return shadowStartVoxelId >= currentCompressedLitInfoMaxVoxelId - 2 && litEndVoxelId <= 2;
             }
 #else
             get
@@ -58,7 +60,7 @@ public class VxOnJobSystem : MonoBehaviour
 #if _LITINFO_NO_CACHE_
             get
             {
-                return litEndVoxelId >= currentCompressedLitInfoMaxVoxelId - 1;
+                return litEndVoxelId >= currentCompressedLitInfoMaxVoxelId - 2;
             }
 #else
             get
@@ -83,7 +85,7 @@ public class VxOnJobSystem : MonoBehaviour
 #if _LITINFO_NO_CACHE_
             get
             {
-                return shadowStartVoxelId <= 1;
+                return shadowStartVoxelId <= 2;
             }
 #else
             get
@@ -101,8 +103,13 @@ public class VxOnJobSystem : MonoBehaviour
                 }
             }
 #endif
+            
         }
 
+        public override string ToString()
+        {
+            return string.Format("$$ litend: {0}  shadowStart: {1}", litEndVoxelId, shadowStartVoxelId);
+        }
     }
 
     public unsafe struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch
@@ -330,7 +337,20 @@ public class VxOnJobSystem : MonoBehaviour
         */
     }
 #endif
-
+    
+    [MenuItem("Tools/PrintLitInfo")]
+    public static void PrintLitInfo()
+    {
+        Texture2D tex = Selection.activeObject as Texture2D;
+        var data = tex.GetRawTextureData<CompressedLitInfo>();
+        for (int i = 0; i < data.Length; i++)
+        {
+            var info = data[i];
+            if(info.litEndVoxelId < 2000)
+                Debug.Log(info);
+        }
+    }
+    
     // Start is called before the first frame update
     void Start()
     { 
