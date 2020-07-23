@@ -1,4 +1,5 @@
 ﻿#define _LITINFO_NO_CACHE_
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -7,9 +8,10 @@ using Unity.Collections.LowLevel;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel;
+using Unity.Jobs.LowLevel.Unsafe;
 using UnityEditor;
 using UnityEngine.UIElements;
-using F = System.Single;
+using F = System.Double;
 public class VxOnJobSystem : MonoBehaviour
 {
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
@@ -112,7 +114,7 @@ public class VxOnJobSystem : MonoBehaviour
         }
     }
 
-    public unsafe struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch
+    public unsafe struct AccelerationJob : IJobParallelFor, Unity.Jobs.IJobParallelForBatch, Unity.Jobs.IJobFor
     {
         int originWidth;
         int originHeight;
@@ -164,22 +166,24 @@ public class VxOnJobSystem : MonoBehaviour
                 System.IntPtr _dstPtr = new System.IntPtr(_dstAddr);
                 Color32* srcPtr = (Color32*)_srcPtr.ToPointer();
                 CompressedLitInfo* dstPtr = (CompressedLitInfo*)_dstPtr.ToPointer();
+                Color32* dstColorPtr = (Color32*) _dstPtr.ToPointer();
 
-                int dstX = index % targetWidth;
-                int dstY = index / targetWidth;
+                int srcBaseX = (index % targetWidth ) * scaler;
+                int srcBaseY = (index / targetWidth) * scaler;
                 F depthMax = -0.1f;
                 F depthMin = 1.1f;
                 F avgDepth = 0;
                 for (int v = 0; v < scaler; v++)
                     for (int u = 0; u < scaler; u++)
                     {
-                        int srcY = scaler * dstY + v;
-                        int srcX = scaler * dstX + u;
+                        int srcY = srcBaseY + v;
+                        int srcX = srcBaseX + u;
                         int srcIndex = srcY * originWidth + srcX;
                         Color32 encodedDepth = srcPtr[srcIndex];
-                        F depth = DecodeFloatRGBA(new Vector4(encodedDepth.r, encodedDepth.g, encodedDepth.b, encodedDepth.a));
-                        depthMax = Mathf.Max(depthMax, depth);
-                        depthMin = Mathf.Min(depthMin, depth);
+                        Color fColor = encodedDepth;
+                        F depth = DecodeFloatRGBA(new Vector4(fColor.r, fColor.g, fColor.b, fColor.a));
+                        depthMax = System.Math.Max(depthMax, depth);
+                        depthMin = System.Math.Min(depthMin, depth);
                         avgDepth += depth;
                     }
 
@@ -190,23 +194,24 @@ public class VxOnJobSystem : MonoBehaviour
                 bool isAllIntersected = true;
 
                 // find out shadow voxel start
-                F shadowPlaneFrontDepth = depthMin - depthMin % depthPerVoxel;
+                F shadowPlaneFrontDepth = depthMin - (depthMin % depthPerVoxel);
                 F shadowPlaneBackDepth = shadowPlaneFrontDepth - depthPerVoxel;
                 
                 // search until all shadow
-                int shadowStartDepth = Mathf.RoundToInt((1 - shadowPlaneFrontDepth) / depthPerVoxel);
+                int shadowStartDepth = (int)System.Math.Round(System.Math.Min(maxVoxel,(1 - shadowPlaneFrontDepth) / depthPerVoxel));
                 for (; shadowStartDepth < maxVoxel; shadowStartDepth++)
                 {
                     isAllShadow = true;
-                    for (int v = 0; v < 2; v++)
+                    for (int v = 0; v < scaler; v++)
                     {
-                        for (int u = 0; u < 2; u++)
+                        for (int u = 0; u < scaler; u++)
                         {
-                            int srcY = scaler * dstY + v;
-                            int srcX = scaler * dstX + u;
+                            int srcY = srcBaseY + v;
+                            int srcX = srcBaseX + u;
                             int srcIndex = srcY * originWidth + srcX;
                             Color32 encodedDepth = srcPtr[srcIndex];
-                            F depth = DecodeFloatRGBA(new Vector4(encodedDepth.r, encodedDepth.g, encodedDepth.b, encodedDepth.a));
+                            Color fColor = encodedDepth;
+                            F depth = DecodeFloatRGBA(new Vector4(fColor.r, fColor.g, fColor.b, fColor.a));
                             isAllShadow &= depth > shadowPlaneFrontDepth;
                         }
                     }
@@ -214,28 +219,27 @@ public class VxOnJobSystem : MonoBehaviour
                         break;
                     shadowPlaneFrontDepth -= depthPerVoxel;
                 }
-                if (isAllShadow)
-                {
-                    //ushort shadowedVoxelIdx = (ushort)Mathf.RoundToInt((1 - depth) / depthPerVoxel);
-                    dstPtr[index].shadowStartVoxelId = (ushort)Mathf.Clamp(shadowStartDepth, 0, maxVoxel);
-                    //int y = index / originWidth;
-                }
+                dstPtr[index].shadowStartVoxelId = (ushort)Mathf.Clamp(shadowStartDepth, 0, maxVoxel);
+                Color32* colorPtr = (Color32*) dstPtr + index;
+                // colorPtr->r = (byte)(dstPtr[index].litEndVoxelId / (float) CompressedLitInfo.currentCompressedLitInfoMaxVoxelId * 255);
 
-                F litPlaneFrontDepth = depthMax - depthMax % depthPerVoxel;
+
+                F litPlaneFrontDepth = depthMax - (depthMax % depthPerVoxel);
                 F litPlaneBackDepth = litPlaneFrontDepth - depthPerVoxel;
-                int litEndDepth = Mathf.RoundToInt((1 - litPlaneFrontDepth) / depthPerVoxel);
+                int litEndDepth = (int) System.Math.Round(System.Math.Min(maxVoxel,(1 - litPlaneBackDepth) / depthPerVoxel));
                 for(;litEndDepth > -1; litEndDepth--)
                 { 
                     isAllLit = true;
-                    for (int v = 0; v < 2; v++)
+                    for (int v = 0; v < scaler; v++)
                     {
-                        for (int u = 0; u < 2; u++)
+                        for (int u = 0; u < scaler; u++)
                         {
-                            int srcY = scaler * dstY + v;
-                            int srcX = scaler * dstX + u;
+                            int srcY = srcBaseY + v;
+                            int srcX = srcBaseX + u;
                             int srcIndex = srcY * originWidth + srcX;
                             Color32 encodedDepth = srcPtr[srcIndex];
-                            F depth = DecodeFloatRGBA(new Vector4(encodedDepth.r, encodedDepth.g, encodedDepth.b, encodedDepth.a));
+                            Color fColor = encodedDepth;
+                            F depth = DecodeFloatRGBA(new Vector4(fColor.r, fColor.g, fColor.b, fColor.a));
                             isAllLit &= depth < litPlaneBackDepth;
                         }
                     }
@@ -243,44 +247,31 @@ public class VxOnJobSystem : MonoBehaviour
                         break;
                     litPlaneBackDepth += depthPerVoxel;
                 }
-                if (isAllLit)
-                {
-                    dstPtr[index].litEndVoxelId = (ushort)Mathf.Clamp(litEndDepth, 0, maxVoxel);
-                }
+                dstPtr[index].litEndVoxelId = (ushort)Mathf.Clamp(litEndDepth, 0, maxVoxel);
+                // colorPtr->b = (byte)(dstPtr[index].shadowStartVoxelId / (float) CompressedLitInfo.currentCompressedLitInfoMaxVoxelId * 255);
 
-
-                /*
-                if (shadowStartDepth <= 1)
+                if (dstPtr[index].litEndVoxelId >= dstPtr[index].shadowStartVoxelId)
                 {
-                    dstPtr[index].IsAllLit = false;
-                    dstPtr[index].IsAllShadow = true;
-                    dstPtr[index].IsAllIntersected = false;
+                    Debug.LogFormat("$$ litEnd:{0} shadowStart:{1} index:{2}", 
+                        dstPtr[index].litEndVoxelId,
+                        dstPtr[index].shadowStartVoxelId,
+                        index);
                 }
-                if(litEndDepth >= maxVoxel - 1)
-                {
-                    dstPtr[index].IsAllLit = true;
-                    dstPtr[index].IsAllShadow = false;
-                    dstPtr[index].IsAllIntersected = false;
-                }
-                if (shadowStartDepth >= maxVoxel - 1 && litEndDepth <= 1)
-                {
-                    dstPtr[index].IsAllLit = false;
-                    dstPtr[index].IsAllShadow = false;
-                    dstPtr[index].IsAllIntersected = true;
-                }
-                */
             }
 
         }
 
         public void Execute(int startIndex, int count)
         {
-            
+            for (int index = startIndex, maxIndex = startIndex + count; index < maxIndex; index++)
+            {
+                Execute(index);
+            }
         }
 
+        static Vector4 kDecodeDot = new Vector4(1.0f, 1 / 255.0f, 1 / 65025.0f, 1 / 16581375.0f);
         public static float DecodeFloatRGBA(Vector4 enc)
         {
-            Vector4 kDecodeDot = new Vector4(1.0f, 1 / 255.0f, 1 / 65025.0f, 1 / 16581375.0f);
             return Vector4.Dot(enc, kDecodeDot);
         }
 
@@ -308,10 +299,16 @@ public class VxOnJobSystem : MonoBehaviour
         AccelerationJob job = new AccelerationJob(srcAddr, dstAddr,
             8192, 8192,
             4096, 4096,
-            2, 1 / 4096f,
+            2, 1 / 4095f,
             4095);
-        job.Run(4096 * 4096);
-
+        //job.Schedule(4096 * 4096, 64);
+        JobHandle jobHandle = new JobHandle();
+        // var jobState = job.ScheduleParallel(4096 * 4096, 64, jobHandle);
+        var jobState = job.Schedule(4096 * 4096, 64);
+        while (!jobState.IsCompleted)
+        {
+            System.Threading.Thread.Sleep(30);
+        }
         Texture2D texLitInfo = new Texture2D(4096, 4096, TextureFormat.RGBA32, false, true);
         texLitInfo.SetPixelData<Color32>( targetData, 0);
         texLitInfo.Apply(false, false);
@@ -351,11 +348,6 @@ public class VxOnJobSystem : MonoBehaviour
         }
     }
     
-    // Start is called before the first frame update
-    void Start()
-    { 
-        new AccelerationJob().Run(1024);
-    }
 
     // Update is called once per frame
     void Update()
