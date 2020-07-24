@@ -157,7 +157,6 @@ public class VxOnJobSystem : MonoBehaviour
 
         }
 
-        [Unity.Burst.BurstCompile]
         public void Execute(int index)
         {
             unsafe

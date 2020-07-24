@@ -484,11 +484,8 @@ public unsafe partial class ShadowmapBaker
                                                                             
                                                                             var lv4LitInfo = lv4LitInfoArrayPtr[targetIndex];
 
-                                                                            bool isLit =
-                                                                                lv4LitInfo.IsAllLit ||
-                                                                                lv4LitInfo.litEndVoxelId >= lv4D;
-                                                                            bool isShadow = lv4LitInfo.IsAllShadow ||
-                                                                                            lv4LitInfo.shadowStartVoxelId <=
+                                                                            bool isLit = lv4LitInfo.litEndVoxelId >= lv4D;
+                                                                            bool isShadow = lv4LitInfo.shadowStartVoxelId <=
                                                                                             lv4D;
                                                                             if (isShadow)
                                                                             {
